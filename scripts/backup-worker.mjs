@@ -1,240 +1,284 @@
 // ============================================================================
-// House of Memories — Automated Backup Worker & Disaster Recovery Engine
+// House of Memories — Automated Cloud Backup Worker & Replica Engine
+// Real Cloud Providers, Streaming Replication, Bounded Memory, Atomic Locking
 // ============================================================================
 
-import fs from "fs";
-import path from "path";
 import crypto from "crypto";
+import { createClient } from "@supabase/supabase-js";
+import {
+  getPrimaryStorageProvider,
+  getStorageProvider,
+} from "../src/lib/storage/index.ts";
 
-const DATA_FILE = path.join(process.cwd(), ".data", "albums-store.json");
+const MAX_JOB_ATTEMPTS = 5;
 
 /**
- * Loads the current store tables.
+ * Creates Supabase admin client using server-side service role key.
  */
-function loadStore() {
-  if (!fs.existsSync(DATA_FILE)) {
-    return {
-      albums: [],
-      albumMemories: [],
-      memories: [],
-      mediaAssets: [],
-      mediaReplicas: [],
-      backupJobs: [],
-      integrityScans: [],
-    };
+export function getSupabaseAdmin() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (!url || !key || url.includes("placeholder") || key.includes("placeholder")) {
+    return null;
   }
-  const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
-  data.mediaAssets = data.mediaAssets || [];
-  data.mediaReplicas = data.mediaReplicas || [];
-  data.backupJobs = data.backupJobs || [];
-  data.integrityScans = data.integrityScans || [];
-  return data;
+
+  return createClient(url, key, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
 }
 
 /**
- * Saves store tables atomically.
- */
-function saveStore(data) {
-  const dir = path.dirname(DATA_FILE);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  const tmp = `${DATA_FILE}.tmp-${Date.now()}`;
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), "utf-8");
-  fs.renameSync(tmp, DATA_FILE);
-}
-
-/**
- * Processes pending backup jobs from primary to secondary storage.
+ * Processes backup jobs using streaming replication directly between cloud providers.
+ * Memory is bounded: original file is streamed directly from primary to secondary.
  */
 export async function processBackupJobs(options = {}) {
-  const { maxJobs = 10, targetSecondary = "cloudflare_r2" } = options;
+  const {
+    maxJobs = 10,
+    customPrimary = null,
+    customSecondary = null,
+    customStore = null, // Mock DB for isolated test environments
+  } = options;
+
   console.log("============================================================");
-  console.log("🔄 House of Memories — Backup Worker Run");
+  console.log("🔄 House of Memories — Cloud Backup Replication Worker");
   console.log("============================================================\n");
 
-  const store = loadStore();
+  const supabase = customStore ? null : getSupabaseAdmin();
+  if (!customStore && !supabase) {
+    throw new Error(
+      "Missing Supabase credentials. Set NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY. " +
+      "Backup worker requires database authority to acquire and update jobs."
+    );
+  }
+
+  const primary = customPrimary || getPrimaryStorageProvider();
+  if (!primary.isConfigured()) {
+    throw new Error(`Primary storage provider (${primary.name}) is not configured.`);
+  }
+
+  // 1. Fetch eligible jobs
+  let pendingJobs = [];
   const now = new Date();
 
-  // Find eligible pending or retryable jobs
-  const pendingJobs = store.backupJobs.filter((job) => {
-    if (job.status === "completed" || job.status === "cancelled") return false;
-    if (job.status === "pending") return true;
-    if (job.status === "failed" && job.attempts < 5) {
-      const nextRetry = job.next_retry_at ? new Date(job.next_retry_at) : new Date(0);
-      return now >= nextRetry;
-    }
-    return false;
-  }).slice(0, maxJobs);
+  if (customStore) {
+    pendingJobs = customStore.backupJobs
+      .filter((j) => {
+        if (j.status === "completed" || j.status === "cancelled") return false;
+        if (j.status === "pending") return true;
+        if (j.status === "failed" && j.attempts < MAX_JOB_ATTEMPTS) {
+          const nextRetry = j.next_retry_at ? new Date(j.next_retry_at) : new Date(0);
+          return now >= nextRetry;
+        }
+        return false;
+      })
+      .slice(0, maxJobs);
+  } else if (supabase) {
+    const { data, error } = await supabase
+      .from("backup_jobs")
+      .select("*, media_assets(*)")
+      .in("status", ["pending", "failed"])
+      .lt("attempts", MAX_JOB_ATTEMPTS)
+      .or(`next_retry_at.is.null,next_retry_at.lte.${now.toISOString()}`)
+      .limit(maxJobs);
 
-  console.log(`Found ${pendingJobs.length} eligible backup jobs.`);
+    if (error) throw new Error(`Failed to query backup jobs: ${error.message}`);
+    pendingJobs = data || [];
+  }
+
+  console.log(`Discovered ${pendingJobs.length} eligible replication jobs.`);
   let processedCount = 0;
   let successCount = 0;
 
   for (const job of pendingJobs) {
     processedCount++;
-    console.log(`\n[Job ${job.id}] Processing asset: ${job.media_asset_id} -> ${job.target_provider}`);
+    const targetProviderType = job.target_provider;
+    console.log(`\n[Job ${job.id}] Replicating asset ${job.media_asset_id} to ${targetProviderType}...`);
 
-    job.status = "in_progress";
-    job.attempts = (job.attempts || 0) + 1;
-    saveStore(store);
+    // 2. Safe atomic acquisition
+    if (customStore) {
+      job.status = "in_progress";
+      job.attempts = (job.attempts || 0) + 1;
+    } else if (supabase) {
+      const { data: acquired, error: acqErr } = await supabase
+        .from("backup_jobs")
+        .update({ status: "in_progress", attempts: job.attempts + 1, updated_at: new Date().toISOString() })
+        .eq("id", job.id)
+        .eq("status", job.status)
+        .select();
 
-    const asset = store.mediaAssets.find((a) => a.id === job.media_asset_id);
+      if (acqErr || !acquired || acquired.length === 0) {
+        console.warn(`[Job ${job.id}] Already acquired by another worker. Skipping.`);
+        continue;
+      }
+    }
+
+    // Resolve Asset
+    let asset = null;
+    if (customStore) {
+      asset = customStore.mediaAssets.find((a) => a.id === job.media_asset_id);
+    } else {
+      asset = job.media_assets;
+    }
+
     if (!asset) {
-      job.status = "failed";
-      job.error_message = `Asset ${job.media_asset_id} not found in database`;
-      saveStore(store);
-      console.error(`❌ ${job.error_message}`);
+      const errMsg = `Asset ${job.media_asset_id} not found in database.`;
+      console.error(`❌ ${errMsg}`);
+      if (customStore) {
+        job.status = "failed";
+        job.error_message = errMsg;
+      } else if (supabase) {
+        await supabase
+          .from("backup_jobs")
+          .update({ status: "failed", error_message: errMsg, updated_at: new Date().toISOString() })
+          .eq("id", job.id);
+      }
+      continue;
+    }
+
+    // Resolve Secondary Provider
+    const secondary = customSecondary || getStorageProvider(targetProviderType);
+    if (!secondary.isConfigured()) {
+      const errMsg = `Secondary provider ${targetProviderType} is not configured in this environment.`;
+      console.warn(`⚠️ ${errMsg}`);
+      const nextRetrySec = Math.pow(2, (job.attempts || 1)) * 30;
+      const nextRetryAt = new Date(Date.now() + nextRetrySec * 1000).toISOString();
+
+      if (customStore) {
+        job.status = "failed";
+        job.error_message = errMsg;
+        job.next_retry_at = nextRetryAt;
+      } else if (supabase) {
+        await supabase
+          .from("backup_jobs")
+          .update({
+            status: "failed",
+            error_message: errMsg,
+            next_retry_at: nextRetryAt,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", job.id);
+      }
       continue;
     }
 
     try {
-      // Resolve source file (from primary storage directory or key)
-      const primaryBase = path.join(process.cwd(), ".data", "media-storage");
-      const sourcePath = path.join(primaryBase, asset.primary_key);
-
-      if (!fs.existsSync(sourcePath)) {
-        throw new Error(`Source primary file not found at: ${sourcePath}`);
+      // 3. Quota check before upload
+      const capacity = await secondary.getCapacity();
+      if (capacity.availableBytes < asset.size_bytes) {
+        throw new Error(
+          `Secondary quota exceeded for ${secondary.name}: available ${capacity.availableBytes} bytes, needed ${asset.size_bytes} bytes.`
+        );
       }
 
-      const sourceBuffer = fs.readFileSync(sourcePath);
-      const sourceChecksum = crypto.createHash("sha256").update(sourceBuffer).digest("hex");
+      // 4. Stream original directly from Primary
+      console.log(`[Stream Transfer] Streaming ${asset.primary_key} from ${primary.name}...`);
+      const { stream: primaryStream } = await primary.downloadStream(asset.primary_key);
 
-      if (asset.sha256_checksum && asset.sha256_checksum.toLowerCase() !== sourceChecksum.toLowerCase()) {
-        throw new Error(`Integrity error: Source file checksum (${sourceChecksum}) does not match asset metadata (${asset.sha256_checksum})`);
+      // 5. Upload stream directly to Secondary Replica
+      const replicaKey = `replicas/${asset.space_id}/${asset.id}/${asset.original_filename}`;
+      console.log(`[Stream Transfer] Writing to ${secondary.name} at ${replicaKey}...`);
+
+      const uploadResult = await secondary.uploadStream(replicaKey, primaryStream, {
+        mimeType: asset.mime_type,
+        sizeBytes: asset.size_bytes,
+        sha256Checksum: asset.sha256_checksum,
+      });
+
+      // 6. Verify destination replica checksum independently
+      const isReplicaValid = await secondary.verifyChecksum(replicaKey, asset.sha256_checksum);
+      if (!isReplicaValid) {
+        await secondary.delete(replicaKey);
+        throw new Error(`Integrity error: Replica SHA-256 check failed on ${secondary.name}`);
       }
 
-      // Replicate to secondary storage folder
-      const secondaryBase = path.join(process.cwd(), ".data", "secondary-storage", job.target_provider);
-      if (!fs.existsSync(secondaryBase)) {
-        fs.mkdirSync(secondaryBase, { recursive: true });
+      // 7. Persist replica record in Supabase
+      const replicaRecord = {
+        id: crypto.randomUUID(),
+        media_asset_id: asset.id,
+        provider: secondary.type,
+        remote_bucket: secondary.bucket || "secondary-bucket",
+        remote_key: replicaKey,
+        status: "verified",
+        sha256_checksum: asset.sha256_checksum,
+        size_bytes: asset.size_bytes,
+        last_verified_at: new Date().toISOString(),
+        created_at: new Date().toISOString(),
+      };
+
+      if (customStore) {
+        customStore.mediaReplicas.push(replicaRecord);
+        const verifiedCount = customStore.mediaReplicas.filter(
+          (r) => r.media_asset_id === asset.id && r.status === "verified"
+        ).length;
+        asset.backup_status = verifiedCount >= 2 ? "fully_backed_up" : "partially_backed_up";
+
+        job.status = "completed";
+        job.completed_at = new Date().toISOString();
+        job.error_message = null;
+      } else if (supabase) {
+        await supabase.from("media_replicas").insert(replicaRecord);
+
+        // Update asset backup status
+        const { data: allReplicas } = await supabase
+          .from("media_replicas")
+          .select("id, status")
+          .eq("media_asset_id", asset.id)
+          .eq("status", "verified");
+
+        const verifiedCount = (allReplicas || []).length;
+        const newStatus = verifiedCount >= 2 ? "fully_backed_up" : "partially_backed_up";
+
+        await supabase.from("media_assets").update({ backup_status: newStatus }).eq("id", asset.id);
+
+        await supabase
+          .from("backup_jobs")
+          .update({
+            status: "completed",
+            completed_at: new Date().toISOString(),
+            error_message: null,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", job.id);
       }
 
-      const replicaKey = `${asset.space_id}/${asset.id}/${asset.original_filename}`;
-      const replicaPath = path.join(secondaryBase, replicaKey);
-      const replicaDir = path.dirname(replicaPath);
-      if (!fs.existsSync(replicaDir)) {
-        fs.mkdirSync(replicaDir, { recursive: true });
-      }
-
-      // Write replica
-      fs.writeFileSync(replicaPath, sourceBuffer);
-
-      // Verify streaming SHA-256 on written replica
-      const writtenBuffer = fs.readFileSync(replicaPath);
-      const replicaChecksum = crypto.createHash("sha256").update(writtenBuffer).digest("hex");
-
-      if (replicaChecksum.toLowerCase() !== sourceChecksum.toLowerCase()) {
-        fs.unlinkSync(replicaPath);
-        throw new Error(`Replica SHA-256 verification failed! Expected: ${sourceChecksum}, got: ${replicaChecksum}`);
-      }
-
-      // Record replica
-      let replica = store.mediaReplicas.find((r) => r.media_asset_id === asset.id && r.provider === job.target_provider);
-      if (!replica) {
-        replica = {
-          id: `replica-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-          media_asset_id: asset.id,
-          provider: job.target_provider,
-          remote_bucket: `hom-backup-${job.target_provider}`,
-          remote_key: replicaKey,
-          status: "verified",
-          sha256_checksum: replicaChecksum,
-          size_bytes: writtenBuffer.length,
-          last_verified_at: new Date().toISOString(),
-          created_at: new Date().toISOString(),
-        };
-        store.mediaReplicas.push(replica);
-      } else {
-        replica.status = "verified";
-        replica.sha256_checksum = replicaChecksum;
-        replica.size_bytes = writtenBuffer.length;
-        replica.last_verified_at = new Date().toISOString();
-      }
-
-      // Update asset backup status
-      const verifiedReplicas = store.mediaReplicas.filter((r) => r.media_asset_id === asset.id && r.status === "verified");
-      asset.backup_status = verifiedReplicas.length >= 2 ? "fully_backed_up" : "partially_backed_up";
-
-      job.status = "completed";
-      job.completed_at = new Date().toISOString();
-      job.error_message = null;
       successCount++;
-
-      console.log(`✓ Replica written & verified for ${asset.original_filename} (SHA-256: ${replicaChecksum.slice(0, 16)}...)`);
-      console.log(`✓ Asset backup status updated to: ${asset.backup_status}`);
+      console.log(`✓ Job completed: Replicated ${asset.original_filename} to ${secondary.name}`);
     } catch (err) {
-      console.error(`❌ Job failed: ${err.message}`);
-      job.status = job.attempts >= 5 ? "failed" : "pending";
-      job.error_message = err.message;
-      // Exponential backoff: 2^attempts * 10 seconds
-      const backoffSec = Math.pow(2, job.attempts) * 10;
-      job.next_retry_at = new Date(Date.now() + backoffSec * 1000).toISOString();
-    }
+      console.error(`❌ Replication failed for ${asset.original_filename}:`, err.message);
+      const isPermanentFailure = (job.attempts || 1) >= MAX_JOB_ATTEMPTS;
+      const nextRetrySec = Math.pow(2, (job.attempts || 1)) * 30;
+      const nextRetryAt = new Date(Date.now() + nextRetrySec * 1000).toISOString();
 
-    saveStore(store);
+      if (customStore) {
+        job.status = isPermanentFailure ? "failed" : "pending";
+        job.error_message = err.message;
+        job.next_retry_at = nextRetryAt;
+      } else if (supabase) {
+        await supabase
+          .from("backup_jobs")
+          .update({
+            status: isPermanentFailure ? "failed" : "pending",
+            error_message: err.message,
+            next_retry_at: isPermanentFailure ? null : nextRetryAt,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", job.id);
+      }
+    }
   }
 
   console.log(`\n============================================================`);
-  console.log(`Worker complete. Processed: ${processedCount}, Succeeded: ${successCount}`);
+  console.log(`Backup worker run complete. Processed: ${processedCount}, Succeeded: ${successCount}`);
   console.log(`============================================================\n`);
 
   return { processedCount, successCount };
 }
 
-/**
- * Runs an integrity audit on all assets and replicas.
- */
-export async function runIntegrityAudit() {
-  console.log("============================================================");
-  console.log("🔍 House of Memories — Archive Integrity Audit Scan");
-  console.log("============================================================\n");
-
-  const store = loadStore();
-  let checked = 0;
-  let intact = 0;
-  let corrupted = 0;
-
-  for (const asset of store.mediaAssets) {
-    checked++;
-    const primaryPath = path.join(process.cwd(), ".data", "media-storage", asset.primary_key);
-    if (!fs.existsSync(primaryPath)) {
-      console.warn(`⚠️ Asset missing from primary storage: ${asset.primary_key}`);
-      asset.backup_status = "integrity_error";
-      corrupted++;
-      continue;
-    }
-
-    const buf = fs.readFileSync(primaryPath);
-    const hash = crypto.createHash("sha256").update(buf).digest("hex");
-    if (asset.sha256_checksum && hash.toLowerCase() !== asset.sha256_checksum.toLowerCase()) {
-      console.error(`❌ Checksum mismatch for asset ${asset.id}! Expected: ${asset.sha256_checksum}, got: ${hash}`);
-      asset.backup_status = "integrity_error";
-      corrupted++;
-    } else {
-      intact++;
-    }
-  }
-
-  const scanRecord = {
-    id: `scan-${Date.now()}`,
-    scanned_at: new Date().toISOString(),
-    total_assets_checked: checked,
-    intact_count: intact,
-    corrupted_count: corrupted,
-    status: corrupted === 0 ? "clean" : "integrity_warnings_found",
-  };
-  store.integrityScans.push(scanRecord);
-  saveStore(store);
-
-  console.log(`Audit finished. Checked: ${checked}, Intact: ${intact}, Corrupted: ${corrupted}`);
-  return scanRecord;
-}
-
-// CLI execution
+// CLI Execution
 if (process.argv[1] && process.argv[1].endsWith("backup-worker.mjs")) {
-  const isAudit = process.argv.includes("--scan-integrity");
-  if (isAudit) {
-    runIntegrityAudit().catch(console.error);
-  } else {
-    processBackupJobs().catch(console.error);
-  }
+  processBackupJobs().catch((err) => {
+    console.error("Backup worker fatal error:", err);
+    process.exit(1);
+  });
 }

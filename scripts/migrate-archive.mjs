@@ -1,15 +1,17 @@
 // ============================================================================
-// House of Memories — Idempotent Media Archive Migration CLI
+// House of Memories — Production Media Archive Migration CLI
+// Streaming, Bounded Memory, Fail-Closed, Direct Cloud Provider
 // ============================================================================
 
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
+import { createClient } from "@supabase/supabase-js";
+import { getPrimaryStorageProvider } from "../src/lib/storage/index.ts";
 
-const DATA_FILE = path.join(process.cwd(), ".data", "albums-store.json");
 const MIGRATION_MANIFESTS_DIR = path.join(process.cwd(), ".data", "migrations");
 
-function getMimeType(filePath) {
+export function getMimeType(filePath) {
   const ext = path.extname(filePath).toLowerCase();
   const map = {
     ".jpg": "image/jpeg",
@@ -17,45 +19,40 @@ function getMimeType(filePath) {
     ".png": "image/png",
     ".webp": "image/webp",
     ".heic": "image/heic",
+    ".heif": "image/heif",
     ".mp4": "video/mp4",
     ".mov": "video/quicktime",
     ".webm": "video/webm",
+    ".mkv": "video/x-matroska",
     ".mp3": "audio/mpeg",
+    ".m4a": "audio/mp4",
     ".wav": "audio/wav",
+    ".ogg": "audio/ogg",
   };
   return map[ext] || "application/octet-stream";
 }
 
-function loadStore() {
-  if (!fs.existsSync(DATA_FILE)) {
-    return {
-      albums: [],
-      albumMemories: [],
-      memories: [],
-      mediaAssets: [],
-      mediaReplicas: [],
-      backupJobs: [],
-      integrityScans: [],
-    };
-  }
-  const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
-  data.mediaAssets = data.mediaAssets || [];
-  data.mediaReplicas = data.mediaReplicas || [];
-  data.backupJobs = data.backupJobs || [];
-  return data;
+/**
+ * Computes SHA-256 using bounded streaming.
+ * Memory consumption is strictly O(1) (~64KB buffer), even for 100GB files.
+ */
+export async function computeFileSha256(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash("sha256");
+    const stream = fs.createReadStream(filePath);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("end", () => resolve(hash.digest("hex")));
+    stream.on("error", (err) => reject(err));
+  });
 }
 
-function saveStore(data) {
-  const dir = path.dirname(DATA_FILE);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  const tmp = `${DATA_FILE}.tmp-${Date.now()}`;
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), "utf-8");
-  fs.renameSync(tmp, DATA_FILE);
-}
-
-function scanLocalFiles(dir) {
-  const results = [];
-  if (!fs.existsSync(dir)) return results;
+/**
+ * Recursively scans source directory for files.
+ * Stores ONLY metadata (paths, sizes, mtime), NEVER file buffers in memory.
+ */
+export function scanSourceInventory(dir) {
+  const inventory = [];
+  if (!fs.existsSync(dir)) return inventory;
 
   function walk(currentDir) {
     const entries = fs.readdirSync(currentDir, { withFileTypes: true });
@@ -64,157 +61,241 @@ function scanLocalFiles(dir) {
       if (entry.isDirectory()) {
         walk(fullPath);
       } else if (entry.isFile() && !entry.name.startsWith(".")) {
-        results.push(fullPath);
+        const stat = fs.statSync(fullPath);
+        inventory.push({
+          filePath: fullPath,
+          fileName: entry.name,
+          relativePath: path.relative(dir, fullPath).replace(/\\/g, "/"),
+          sizeBytes: stat.size,
+          mimeType: getMimeType(entry.name),
+          mtime: stat.mtime.toISOString(),
+        });
       }
     }
   }
 
   walk(dir);
-  return results;
+  return inventory;
 }
 
+/**
+ * Creates Supabase admin client using server-side service role key.
+ */
+export function getSupabaseAdmin() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (!url || !key || url.includes("placeholder") || key.includes("placeholder")) {
+    return null;
+  }
+
+  return createClient(url, key, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+}
+
+/**
+ * Executes migration with bounded concurrency and streaming uploads.
+ */
 export async function runMigration(options = {}) {
   const {
     sourceDir,
     dryRun = false,
     resume = true,
-    batchSize = 20,
-    verifyOnly = false,
-    spaceId = "00000000-0000-0000-0000-000000000001",
-    userId = "00000000-0000-0000-0000-000000000001",
+    concurrency = 2,
+    spaceId = process.env.HOM_SPACE_ID,
+    userId = process.env.HOM_USER_ID,
+    customProvider = null,
+    customStore = null, // Mock DB for isolated test environments
   } = options;
 
   console.log("============================================================");
-  console.log("🚀 House of Memories — Media Archive Migration CLI");
+  console.log("🚀 House of Memories — Production Media Archive Migration");
   console.log("============================================================\n");
-  console.log(`Source directory: ${sourceDir}`);
-  console.log(`Mode: ${dryRun ? "DRY-RUN (no files will be written)" : verifyOnly ? "VERIFY ONLY" : "MIGRATE & UPLOAD"}`);
-  console.log(`Resume mode: ${resume ? "Enabled (skipping existing checksums)" : "Disabled"}\n`);
 
   if (!sourceDir || !fs.existsSync(sourceDir)) {
     throw new Error(`Source directory does not exist: ${sourceDir}`);
   }
 
-  const allFiles = scanLocalFiles(sourceDir);
-  console.log(`Discovered ${allFiles.length} files in source.`);
+  if (!spaceId) {
+    throw new Error(
+      "Missing required space ID. Pass --space-id <uuid> or set HOM_SPACE_ID. " +
+      "Hardcoded default IDs are rejected in production."
+    );
+  }
 
-  const store = loadStore();
-  const existingChecksums = new Map(store.mediaAssets.map((a) => [a.sha256_checksum?.toLowerCase(), a]));
+  if (!userId) {
+    throw new Error(
+      "Missing required user ID. Pass --user-id <uuid> or set HOM_USER_ID. " +
+      "Hardcoded default IDs are rejected in production."
+    );
+  }
 
-  const inventory = [];
-  const duplicates = [];
-  let totalBytes = 0;
+  console.log(`Source Archive: ${sourceDir}`);
+  console.log(`Target Space ID: ${spaceId}`);
+  console.log(`Uploader ID:    ${userId}`);
+  console.log(`Execution Mode: ${dryRun ? "DRY RUN (no uploads or DB writes)" : "LIVE CLOUD MIGRATION"}`);
+  console.log(`Concurrency:    ${concurrency} streams\n`);
 
-  console.log("Generating SHA-256 inventory...");
-  for (const filePath of allFiles) {
-    const stat = fs.statSync(filePath);
-    const buffer = fs.readFileSync(filePath);
-    const checksum = crypto.createHash("sha256").update(buffer).digest("hex");
-    const mimeType = getMimeType(filePath);
+  // Verify Primary Storage Provider
+  const provider = customProvider || getPrimaryStorageProvider();
+  console.log(`Storage Target: ${provider.name} (${provider.type})`);
 
-    totalBytes += stat.size;
+  if (!provider.isConfigured()) {
+    throw new Error(`Storage provider ${provider.name} is not configured.`);
+  }
 
-    if (existingChecksums.has(checksum)) {
-      duplicates.push({
-        filePath,
-        checksum,
-        existingAssetId: existingChecksums.get(checksum).id,
-      });
+  // Verify bucket connectivity before beginning
+  const bucketCheck = await provider.verifyBucket();
+  if (!bucketCheck.exists) {
+    throw new Error(`Primary storage bucket verification failed: ${bucketCheck.message}`);
+  }
+  console.log(`✓ Bucket connectivity verified: ${bucketCheck.bucket}\n`);
+
+  const supabase = customStore ? null : getSupabaseAdmin();
+  if (!customStore && !supabase && !dryRun) {
+    console.warn("⚠️ Warning: Supabase service role key not provided. Operating in dry-run/manifest-only mode.");
+  }
+
+  // 1. Scan source directory (Metadata ONLY)
+  console.log("Scanning source files (metadata only, no buffering)...");
+  const inventory = scanSourceInventory(sourceDir);
+  const totalSizeBytes = inventory.reduce((sum, f) => sum + f.sizeBytes, 0);
+  console.log(`Discovered ${inventory.length} files (${(totalSizeBytes / (1024 * 1024 * 1024)).toFixed(2)} GB total).\n`);
+
+  // 2. Compute streaming checksums and check for existing assets
+  console.log("Analyzing file integrity and checking database for existing assets...");
+  const toUpload = [];
+  const existingDuplicates = [];
+
+  for (const item of inventory) {
+    const sha256 = await computeFileSha256(item.filePath);
+    item.sha256 = sha256;
+
+    // Check database if asset already exists in space
+    let exists = false;
+    if (customStore) {
+      exists = customStore.mediaAssets.some(
+        (a) => a.space_id === spaceId && a.sha256_checksum.toLowerCase() === sha256.toLowerCase()
+      );
+    } else if (supabase) {
+      const { data } = await supabase
+        .from("media_assets")
+        .select("id, original_filename")
+        .eq("space_id", spaceId)
+        .eq("sha256_checksum", sha256)
+        .limit(1);
+      exists = Boolean(data && data.length > 0);
+    }
+
+    if (exists && resume) {
+      existingDuplicates.push(item);
     } else {
-      inventory.push({
-        filePath,
-        fileName: path.basename(filePath),
-        sizeBytes: stat.size,
-        mimeType,
-        checksum,
-        buffer,
-      });
+      toUpload.push(item);
     }
   }
 
-  console.log(`✓ Inventory analyzed:`);
-  console.log(`  - Total files: ${allFiles.length}`);
-  console.log(`  - Total size: ${(totalBytes / (1024 * 1024)).toFixed(2)} MB`);
-  console.log(`  - Unique new files: ${inventory.length}`);
-  console.log(`  - Existing / Duplicates: ${duplicates.length}\n`);
+  console.log(`✓ Checksum inventory completed:`);
+  console.log(`  - Total files scanned: ${inventory.length}`);
+  console.log(`  - Unique to upload:    ${toUpload.length}`);
+  console.log(`  - Existing/Duplicate:  ${existingDuplicates.length}\n`);
 
   if (dryRun) {
-    console.log("[DRY-RUN COMPLETE] No changes made.");
+    console.log("[DRY RUN COMPLETE] Source files untouched. No uploads or DB modifications made.");
     return {
       dryRun: true,
-      totalFiles: allFiles.length,
-      newFiles: inventory.length,
-      duplicates: duplicates.length,
-      totalBytes,
+      totalFiles: inventory.length,
+      toUploadCount: toUpload.length,
+      duplicateCount: existingDuplicates.length,
+      totalSizeBytes,
     };
   }
 
-  // Upload to primary storage
-  const primaryStorageDir = path.join(process.cwd(), ".data", "media-storage");
-  if (!fs.existsSync(primaryStorageDir)) {
-    fs.mkdirSync(primaryStorageDir, { recursive: true });
+  // 3. Concurrency-bounded streaming migration
+  console.log(`Beginning streaming upload of ${toUpload.length} files...`);
+  const uploadedAssets = [];
+  const failedUploads = [];
+  let completedCount = 0;
+
+  // Process in pools of `concurrency`
+  for (let i = 0; i < toUpload.length; i += concurrency) {
+    const batch = toUpload.slice(i, i + concurrency);
+
+    await Promise.all(
+      batch.map(async (item) => {
+        const assetId = crypto.randomUUID();
+        const primaryKey = `${spaceId}/${assetId}/${item.fileName}`;
+
+        try {
+          console.log(`[Stream -> Cloud] Uploading: ${item.relativePath} (${(item.sizeBytes / (1024 * 1024)).toFixed(1)} MB)...`);
+
+          // Direct file stream into storage provider
+          const fileStream = fs.createReadStream(item.filePath);
+          const uploadRes = await provider.uploadStream(primaryKey, fileStream, {
+            mimeType: item.mimeType,
+            sizeBytes: item.sizeBytes,
+            sha256Checksum: item.sha256,
+          });
+
+          // Verify destination checksum against local calculation
+          const isVerified = await provider.verifyChecksum(primaryKey, item.sha256);
+          if (!isVerified) {
+            await provider.delete(primaryKey);
+            throw new Error(`Integrity error: Destination checksum failed post-upload verification for ${item.fileName}`);
+          }
+
+          // Persist record to Supabase
+          const assetRecord = {
+            id: assetId,
+            space_id: spaceId,
+            uploader_id: userId,
+            original_filename: item.fileName,
+            mime_type: item.mimeType,
+            size_bytes: item.sizeBytes,
+            sha256_checksum: item.sha256,
+            primary_provider: provider.type,
+            primary_key: primaryKey,
+            backup_status: "backup_pending",
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          };
+
+          if (customStore) {
+            customStore.mediaAssets.push(assetRecord);
+            customStore.backupJobs.push({
+              id: crypto.randomUUID(),
+              media_asset_id: assetId,
+              target_provider: "cloudflare_r2",
+              status: "pending",
+              attempts: 0,
+              created_at: new Date().toISOString(),
+            });
+          } else if (supabase) {
+            const { error: assetErr } = await supabase.from("media_assets").insert(assetRecord);
+            if (assetErr) throw assetErr;
+
+            // Queue backup job for secondary replica
+            const { error: jobErr } = await supabase.from("backup_jobs").insert({
+              media_asset_id: assetId,
+              target_provider: "cloudflare_r2",
+              status: "pending",
+              attempts: 0,
+            });
+            if (jobErr) console.warn(`[Job Queue] Warning: failed to queue backup job for ${assetId}:`, jobErr.message);
+          }
+
+          completedCount++;
+          uploadedAssets.push(assetRecord);
+          console.log(`✓ Completed [${completedCount}/${toUpload.length}]: ${item.fileName} (SHA-256: ${item.sha256.slice(0, 16)}...)`);
+        } catch (err) {
+          console.error(`❌ Upload failed for ${item.fileName}:`, err.message);
+          failedUploads.push({ file: item.fileName, error: err.message });
+        }
+      })
+    );
   }
 
-  let uploadedCount = 0;
-  let batchIndex = 0;
-
-  for (let i = 0; i < inventory.length; i += batchSize) {
-    batchIndex++;
-    const batch = inventory.slice(i, i + batchSize);
-    console.log(`Processing Batch ${batchIndex} (${batch.length} files)...`);
-
-    for (const item of batch) {
-      const assetId = `asset-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
-      const primaryKey = `${spaceId}/${assetId}/${item.fileName}`;
-      const destPath = path.join(primaryStorageDir, primaryKey);
-      const destDir = path.dirname(destPath);
-      if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
-
-      // Write to primary
-      fs.writeFileSync(destPath, item.buffer);
-
-      // Verify destination checksum
-      const destBuf = fs.readFileSync(destPath);
-      const destChecksum = crypto.createHash("sha256").update(destBuf).digest("hex");
-      if (destChecksum.toLowerCase() !== item.checksum.toLowerCase()) {
-        fs.unlinkSync(destPath);
-        throw new Error(`Integrity error during migration for ${item.fileName}! Checksums do not match.`);
-      }
-
-      // Record in store
-      const assetRecord = {
-        id: assetId,
-        space_id: spaceId,
-        uploader_id: userId,
-        original_filename: item.fileName,
-        mime_type: item.mimeType,
-        size_bytes: item.sizeBytes,
-        sha256_checksum: item.checksum,
-        primary_provider: "minio_oci",
-        primary_key: primaryKey,
-        backup_status: "backup_pending",
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      };
-      store.mediaAssets.push(assetRecord);
-
-      // Queue backup job for secondary replica
-      store.backupJobs.push({
-        id: `job-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-        media_asset_id: assetId,
-        target_provider: "cloudflare_r2",
-        status: "pending",
-        attempts: 0,
-        created_at: new Date().toISOString(),
-      });
-
-      uploadedCount++;
-    }
-
-    saveStore(store);
-  }
-
-  // Create migration manifest
+  // 4. Generate Migration Manifest
   if (!fs.existsSync(MIGRATION_MANIFESTS_DIR)) {
     fs.mkdirSync(MIGRATION_MANIFESTS_DIR, { recursive: true });
   }
@@ -225,49 +306,61 @@ export async function runMigration(options = {}) {
     manifestId,
     timestamp: new Date().toISOString(),
     sourceDir,
-    totalFiles: allFiles.length,
-    uploadedCount,
-    duplicatesSkipped: duplicates.length,
-    totalBytesMigrated: inventory.reduce((sum, item) => sum + item.sizeBytes, 0),
-    status: "completed",
+    spaceId,
+    provider: provider.name,
+    totalFilesScanned: inventory.length,
+    uploadedCount: uploadedAssets.length,
+    duplicatesSkipped: existingDuplicates.length,
+    failedCount: failedUploads.length,
+    failures: failedUploads,
+    totalBytesMigrated: uploadedAssets.reduce((sum, item) => sum + item.size_bytes, 0),
+    status: failedUploads.length === 0 ? "completed" : "completed_with_errors",
   };
 
   fs.writeFileSync(manifestPath, JSON.stringify(manifestData, null, 2), "utf-8");
-  console.log(`\n✓ Migration completed successfully!`);
-  console.log(`✓ Migration manifest saved: ${manifestPath}`);
+  console.log(`\n============================================================`);
+  console.log(`Migration finished. Uploaded: ${uploadedAssets.length}, Failed: ${failedUploads.length}`);
+  console.log(`Manifest written: ${manifestPath}`);
+  console.log(`Original source files preserved untouched.`);
+  console.log(`============================================================\n`);
 
   return manifestData;
 }
 
-// CLI entry point
+// CLI Execution
 if (process.argv[1] && process.argv[1].endsWith("migrate-archive.mjs")) {
   const args = process.argv.slice(2);
   let sourceDir = null;
   let dryRun = false;
-  let resume = true;
-  let batchSize = 20;
+  let spaceId = process.env.HOM_SPACE_ID;
+  let userId = process.env.HOM_USER_ID;
+  let concurrency = 2;
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--source" && args[i + 1]) {
       sourceDir = args[i + 1];
       i++;
+    } else if (args[i] === "--space-id" && args[i + 1]) {
+      spaceId = args[i + 1];
+      i++;
+    } else if (args[i] === "--user-id" && args[i + 1]) {
+      userId = args[i + 1];
+      i++;
+    } else if (args[i] === "--concurrency" && args[i + 1]) {
+      concurrency = parseInt(args[i + 1], 10);
+      i++;
     } else if (args[i] === "--dry-run") {
       dryRun = true;
-    } else if (args[i] === "--no-resume") {
-      resume = false;
-    } else if (args[i] === "--batch-size" && args[i + 1]) {
-      batchSize = parseInt(args[i + 1], 10);
-      i++;
     }
   }
 
   if (!sourceDir) {
-    console.error("Usage: node scripts/migrate-archive.mjs --source <dir> [--dry-run] [--batch-size 20]");
+    console.error("Usage: node scripts/migrate-archive.mjs --source <dir> --space-id <uuid> --user-id <uuid> [--dry-run] [--concurrency 2]");
     process.exit(1);
   }
 
-  runMigration({ sourceDir, dryRun, resume, batchSize }).catch((err) => {
-    console.error("Migration failed:", err);
+  runMigration({ sourceDir, dryRun, spaceId, userId, concurrency }).catch((err) => {
+    console.error("Migration failed:", err.message);
     process.exit(1);
   });
 }

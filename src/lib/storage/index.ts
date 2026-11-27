@@ -2,18 +2,19 @@
 // House of Memories — Storage Provider Abstraction & Multi-Cloud Router
 // ============================================================================
 
-import { StorageProvider, StorageProviderType } from "./types";
-import { LocalStorageProvider } from "./providers/local-provider";
-import { MinIOStorageProvider } from "./providers/minio-provider";
-import { R2StorageProvider } from "./providers/r2-provider";
-import { OCIObjectStorageProvider } from "./providers/oci-object-provider";
+import type { StorageProvider, StorageProviderType } from "./types.ts";
+import { LocalStorageProvider } from "./providers/local-provider.ts";
+import { MinIOStorageProvider } from "./providers/minio-provider.ts";
+import { R2StorageProvider } from "./providers/r2-provider.ts";
+import { OCIObjectStorageProvider } from "./providers/oci-object-provider.ts";
 import crypto from "crypto";
+import { Readable } from "stream";
 
-export * from "./types";
-export { LocalStorageProvider } from "./providers/local-provider";
-export { MinIOStorageProvider } from "./providers/minio-provider";
-export { R2StorageProvider } from "./providers/r2-provider";
-export { OCIObjectStorageProvider } from "./providers/oci-object-provider";
+export type * from "./types.ts";
+export { LocalStorageProvider } from "./providers/local-provider.ts";
+export { MinIOStorageProvider, validateStorageKey } from "./providers/minio-provider.ts";
+export { R2StorageProvider } from "./providers/r2-provider.ts";
+export { OCIObjectStorageProvider } from "./providers/oci-object-provider.ts";
 
 let primaryProviderInstance: StorageProvider | null = null;
 let secondaryProvidersInstances: StorageProvider[] | null = null;
@@ -26,6 +27,15 @@ export function getLocalStorageProvider(): StorageProvider {
   return localFallbackInstance;
 }
 
+/**
+ * Returns the primary storage provider.
+ *
+ * FAIL-CLOSED POLICY:
+ * In production, MinIO on OCI is required. If MinIO is unconfigured, this function
+ * FAILS CLOSED (throws an error) rather than silently writing to local disk.
+ *
+ * Local storage is strictly permitted only when ALLOW_LOCAL_STORAGE=true or NODE_ENV=test.
+ */
 export function getPrimaryStorageProvider(): StorageProvider {
   if (primaryProviderInstance) {
     return primaryProviderInstance;
@@ -37,9 +47,34 @@ export function getPrimaryStorageProvider(): StorageProvider {
     return primaryProviderInstance;
   }
 
-  // Graceful local fallback for development / offline environments
-  primaryProviderInstance = getLocalStorageProvider();
-  return primaryProviderInstance;
+  // Check if explicitly permitted for offline development or automated tests
+  const isTest = process.env.NODE_ENV === "test";
+  const explicitDev = process.env.ALLOW_LOCAL_STORAGE === "true";
+
+  if (isTest || explicitDev) {
+    console.warn(
+      "[Storage Router] NOTICE: Operating with LocalStorageProvider fallback because ALLOW_LOCAL_STORAGE=true or NODE_ENV=test. " +
+      "This is strictly restricted to development/test environments."
+    );
+    primaryProviderInstance = getLocalStorageProvider();
+    return primaryProviderInstance;
+  }
+
+  // FAIL CLOSED IN PRODUCTION
+  throw new Error(
+    "CRITICAL STORAGE ERROR: Primary storage (MinIO on OCI) is not configured. " +
+    "Missing required environment variables: MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, and MINIO_BUCKET_NAME. " +
+    "Uploads fail closed to prevent silent local writes to unmonitored storage."
+  );
+}
+
+/**
+ * Resets cached instances (used during testing to switch configurations).
+ */
+export function resetStorageProviderInstances(): void {
+  primaryProviderInstance = null;
+  secondaryProvidersInstances = null;
+  localFallbackInstance = null;
 }
 
 export function getSecondaryStorageProviders(): StorageProvider[] {
@@ -82,55 +117,60 @@ export function getStorageProvider(typeOrName: StorageProviderType | string): St
 }
 
 /**
- * Downloads a file with automatic failover to secondary replicas if primary fails.
+ * Downloads a file with streaming failover to secondary replicas if primary fails.
+ * Bounded memory: streams the result rather than buffering entire files.
  */
-export async function downloadWithFailover(
+export async function downloadWithFailoverStream(
   primaryKey: string,
   replicas?: Array<{ provider: string; remoteKey: string; sha256Checksum: string }>
-): Promise<{ buffer: Buffer; providerUsed: string; verified: boolean }> {
-  const primary = getPrimaryStorageProvider();
-
-  // Try primary first
+): Promise<{ stream: Readable; providerUsed: string; sizeBytes?: number; sha256Checksum?: string }> {
+  let primary: StorageProvider | null = null;
   try {
-    const buffer = await primary.download(primaryKey);
-    return {
-      buffer,
-      providerUsed: primary.name,
-      verified: true,
-    };
-  } catch (primaryErr: any) {
-    console.warn(`[Failover] Primary storage (${primary.name}) failed for key ${primaryKey}:`, primaryErr.message);
-
-    if (!replicas || replicas.length === 0) {
-      throw new Error(`Primary storage failed and no secondary replicas exist for ${primaryKey}: ${primaryErr.message}`);
-    }
-
-    // Try secondary replicas
-    for (const replica of replicas) {
-      try {
-        console.log(`[Failover] Attempting recovery from secondary provider: ${replica.provider}`);
-        const provider = getStorageProvider(replica.provider);
-        const buffer = await provider.download(replica.remoteKey);
-
-        // Verify replica checksum
-        if (replica.sha256Checksum) {
-          const checksum = crypto.createHash("sha256").update(buffer).digest("hex");
-          if (checksum.toLowerCase() !== replica.sha256Checksum.toLowerCase()) {
-            console.error(`[Failover] Checksum mismatch from replica ${replica.provider} for key ${replica.remoteKey}`);
-            continue;
-          }
-        }
-
-        return {
-          buffer,
-          providerUsed: provider.name,
-          verified: true,
-        };
-      } catch (replicaErr: any) {
-        console.warn(`[Failover] Replica ${replica.provider} failed:`, replicaErr.message);
-      }
-    }
-
-    throw new Error(`Disaster Recovery Error: All primary and replica storage sources failed for ${primaryKey}`);
+    primary = getPrimaryStorageProvider();
+  } catch (err: any) {
+    console.warn(`[Failover] Primary provider unavailable: ${err.message}`);
   }
+
+  // Try primary first if available
+  if (primary) {
+    try {
+      const res = await primary.downloadStream(primaryKey);
+      return {
+        stream: res.stream,
+        providerUsed: primary.name,
+        sizeBytes: res.contentLength,
+        sha256Checksum: res.sha256Checksum,
+      };
+    } catch (primaryErr: any) {
+      console.warn(`[Failover] Primary storage downloadStream failed for key ${primaryKey}: ${primaryErr.message}`);
+    }
+  }
+
+  if (!replicas || replicas.length === 0) {
+    throw new Error(`Primary storage failed and no secondary replicas exist for ${primaryKey}`);
+  }
+
+  // Try secondary replicas
+  for (const replica of replicas) {
+    try {
+      console.log(`[Failover] Attempting recovery from secondary provider: ${replica.provider}`);
+      const provider = getStorageProvider(replica.provider);
+      if (!provider.isConfigured()) {
+        console.warn(`[Failover] Replica provider ${replica.provider} is not configured.`);
+        continue;
+      }
+
+      const res = await provider.downloadStream(replica.remoteKey);
+      return {
+        stream: res.stream,
+        providerUsed: provider.name,
+        sizeBytes: res.contentLength,
+        sha256Checksum: replica.sha256Checksum,
+      };
+    } catch (replicaErr: any) {
+      console.warn(`[Failover] Replica ${replica.provider} failed:`, replicaErr.message);
+    }
+  }
+
+  throw new Error(`Disaster Recovery Error: All primary and replica storage sources failed for ${primaryKey}`);
 }

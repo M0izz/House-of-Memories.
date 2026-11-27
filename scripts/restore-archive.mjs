@@ -1,73 +1,108 @@
 // ============================================================================
-// House of Memories — Archive Restore Tool (Disaster Recovery)
+// House of Memories — Archive Restore from Secondary Replica
+// Real Providers, Streaming Reconstruction, Supabase Metadata Authority
 // ============================================================================
 
-import fs from "fs";
-import path from "path";
-import crypto from "crypto";
-
-const DATA_FILE = path.join(process.cwd(), ".data", "albums-store.json");
+import { createClient } from "@supabase/supabase-js";
+import {
+  getPrimaryStorageProvider,
+  getStorageProvider,
+} from "../src/lib/storage/index.ts";
 
 export async function restoreFromReplica(options = {}) {
   const {
     fromProvider = "cloudflare_r2",
-    targetDir = path.join(process.cwd(), ".data", "media-storage"),
+    customPrimary = null,
+    customSecondary = null,
+    customStore = null,
   } = options;
 
   console.log("============================================================");
   console.log("🔄 House of Memories — Archive Restore from Secondary Replica");
   console.log("============================================================\n");
   console.log(`Source Provider: ${fromProvider}`);
-  console.log(`Target Destination: ${targetDir}\n`);
 
-  if (!fs.existsSync(DATA_FILE)) {
-    throw new Error("No database store found at " + DATA_FILE);
+  let replicas = [];
+  let assetsMap = new Map();
+
+  if (customStore) {
+    replicas = (customStore.mediaReplicas || []).filter(
+      (r) => r.provider === fromProvider && r.status === "verified"
+    );
+    for (const a of customStore.mediaAssets || []) {
+      assetsMap.set(a.id, a);
+    }
+  } else {
+    const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!url || !key || url.includes("placeholder")) {
+      throw new Error("Missing Supabase credentials for restore operation.");
+    }
+    const supabase = createClient(url, key, { auth: { persistSession: false } });
+
+    const { data: repData, error: repErr } = await supabase
+      .from("media_replicas")
+      .select("*, media_assets(*)")
+      .eq("provider", fromProvider)
+      .eq("status", "verified");
+
+    if (repErr) throw new Error(`Failed to query replicas: ${repErr.message}`);
+    replicas = repData || [];
+    for (const r of replicas) {
+      if (r.media_assets) assetsMap.set(r.media_asset_id, r.media_assets);
+    }
   }
 
-  const store = JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
-  const replicas = (store.mediaReplicas || []).filter((r) => r.provider === fromProvider && r.status === "verified");
+  console.log(`Found ${replicas.length} verified cloud replicas on ${fromProvider}.`);
 
-  console.log(`Found ${replicas.length} verified replicas to restore.`);
+  const primary = customPrimary || getPrimaryStorageProvider();
+  const secondary = customSecondary || getStorageProvider(fromProvider);
 
-  if (!fs.existsSync(targetDir)) {
-    fs.mkdirSync(targetDir, { recursive: true });
+  if (!primary.isConfigured()) {
+    throw new Error(`Primary storage (${primary.name}) is not configured.`);
+  }
+  if (!secondary.isConfigured()) {
+    throw new Error(`Secondary replica provider (${secondary.name}) is not configured.`);
   }
 
   let restoredCount = 0;
   let bytesRestored = 0;
 
   for (const replica of replicas) {
-    const asset = (store.mediaAssets || []).find((a) => a.id === replica.media_asset_id);
-    if (!asset) continue;
-
-    const replicaPath = path.join(process.cwd(), ".data", "secondary-storage", fromProvider, replica.remote_key);
-    if (!fs.existsSync(replicaPath)) {
-      console.warn(`Replica file missing on disk: ${replicaPath}`);
+    const asset = assetsMap.get(replica.media_asset_id);
+    if (!asset) {
+      console.warn(`[Restore] Missing asset metadata for replica ${replica.id}. Skipping.`);
       continue;
     }
 
-    const destPath = path.join(targetDir, asset.primary_key);
-    const destDir = path.dirname(destPath);
-    if (!fs.existsSync(destDir)) {
-      fs.mkdirSync(destDir, { recursive: true });
+    console.log(`[Stream Restore] Pulling ${replica.remote_key} from ${secondary.name} -> ${primary.name}...`);
+    try {
+      // Stream directly from secondary replica
+      const { stream } = await secondary.downloadStream(replica.remote_key);
+
+      // Stream upload directly into primary store
+      const uploadRes = await primary.uploadStream(asset.primary_key, stream, {
+        mimeType: asset.mime_type,
+        sizeBytes: asset.size_bytes,
+        sha256Checksum: asset.sha256_checksum,
+      });
+
+      // Verify SHA-256 on restored primary file
+      const isVerified = await primary.verifyChecksum(asset.primary_key, asset.sha256_checksum);
+      if (!isVerified) {
+        throw new Error(`Integrity check failed on restored primary asset ${asset.primary_key}`);
+      }
+
+      restoredCount++;
+      bytesRestored += asset.size_bytes || 0;
+      console.log(`✓ Restored to primary: ${asset.original_filename} (${(asset.size_bytes / 1024).toFixed(1)} KB)`);
+    } catch (err) {
+      console.error(`❌ Failed restoring ${asset.original_filename}:`, err.message);
     }
-
-    const replicaBuf = fs.readFileSync(replicaPath);
-    const checksum = crypto.createHash("sha256").update(replicaBuf).digest("hex");
-
-    if (replica.sha256_checksum && checksum.toLowerCase() !== replica.sha256_checksum.toLowerCase()) {
-      console.error(`Integrity mismatch on replica ${replica.id}! Skipping.`);
-      continue;
-    }
-
-    fs.writeFileSync(destPath, replicaBuf);
-    restoredCount++;
-    bytesRestored += replicaBuf.length;
-    console.log(`✓ Restored: ${asset.original_filename} (${(replicaBuf.length / 1024).toFixed(1)} KB)`);
   }
 
   console.log(`\n============================================================`);
-  console.log(`Restoration finished. Files: ${restoredCount}, Total: ${(bytesRestored / (1024 * 1024)).toFixed(2)} MB`);
+  console.log(`Restoration complete. Assets restored: ${restoredCount}, Total bytes: ${(bytesRestored / (1024 * 1024)).toFixed(2)} MB`);
   console.log(`============================================================\n`);
 
   return { restoredCount, bytesRestored };
@@ -82,5 +117,8 @@ if (process.argv[1] && process.argv[1].endsWith("restore-archive.mjs")) {
       i++;
     }
   }
-  restoreFromReplica({ fromProvider }).catch(console.error);
+  restoreFromReplica({ fromProvider }).catch((err) => {
+    console.error("Archive restore fatal error:", err);
+    process.exit(1);
+  });
 }

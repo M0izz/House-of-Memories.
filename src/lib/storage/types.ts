@@ -2,6 +2,8 @@
 // House of Memories — Storage Provider Abstraction Types
 // ============================================================================
 
+import type { Readable } from "stream";
+
 export type StorageProviderType =
   | "minio_oci"
   | "cloudflare_r2"
@@ -32,18 +34,38 @@ export interface CapacityInfo {
   usedBytes: number;
   availableBytes: number;
   percentUsed: number;
+  isEstimated?: boolean;
+  measuredAt: Date;
 }
 
 export interface HealthCheckResult {
   healthy: boolean;
   latencyMs: number;
   message?: string;
+  bucketExists?: boolean;
 }
 
 export interface UploadOptions {
   mimeType?: string;
+  sizeBytes?: number;
   sha256Checksum?: string;
   customMetadata?: Record<string, string>;
+  partSizeBytes?: number;
+}
+
+export interface UploadResult {
+  key: string;
+  etag?: string;
+  sha256Checksum: string;
+  sizeBytes: number;
+}
+
+export interface DownloadStreamResult {
+  stream: Readable;
+  contentLength?: number;
+  contentType?: string;
+  sha256Checksum?: string;
+  etag?: string;
 }
 
 export interface StorageProvider {
@@ -52,12 +74,35 @@ export interface StorageProvider {
 
   isConfigured(): boolean;
 
+  verifyBucket(): Promise<{ exists: boolean; bucket: string; message?: string }>;
+
+  /**
+   * Uploads buffered data (for small files/metadata). Validates checksum.
+   */
   upload(
     key: string,
     data: Buffer | Uint8Array,
     options?: UploadOptions
-  ): Promise<{ key: string; etag?: string; sha256Checksum?: string }>;
+  ): Promise<UploadResult>;
 
+  /**
+   * Streams data directly to storage using bounded memory and multipart upload.
+   * Never buffers entire large files into memory.
+   */
+  uploadStream(
+    key: string,
+    stream: Readable,
+    options?: UploadOptions
+  ): Promise<UploadResult>;
+
+  /**
+   * Streams data directly from storage without loading into a single memory buffer.
+   */
+  downloadStream(key: string): Promise<DownloadStreamResult>;
+
+  /**
+   * Downloads small object into memory (enforces max limit e.g. 100MB).
+   */
   download(key: string): Promise<Buffer>;
 
   delete(key: string): Promise<void>;
