@@ -1,5 +1,9 @@
 import { NextResponse } from "next/server";
-import { getAlbumById, updateAlbum, deleteAlbum } from "@/lib/albums-store";
+import {
+  fetchAlbumById,
+  updateAlbumRecord,
+  deleteAlbumRecord,
+} from "@/lib/repositories/memory-repository";
 
 export async function GET(
   request: Request,
@@ -7,7 +11,7 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    const album = getAlbumById(id);
+    const { album, isDemoMode } = await fetchAlbumById(id);
 
     if (!album) {
       return NextResponse.json(
@@ -19,6 +23,7 @@ export async function GET(
     return NextResponse.json({
       success: true,
       album,
+      isDemoMode,
     });
   } catch (error: any) {
     return NextResponse.json(
@@ -35,17 +40,16 @@ export async function PATCH(
   try {
     const { id } = await params;
     const body = await request.json();
-    const { title, description, coverImageUrl, coverMemoryId, isFavorite } = body;
+    const { title, description, coverImageUrl, isFavorite } = body;
 
-    const updated = updateAlbum(id, {
+    const { album, isDemoMode } = await updateAlbumRecord(id, {
       title,
       description,
       coverImageUrl,
-      coverMemoryId,
       isFavorite,
     });
 
-    if (!updated) {
+    if (!album) {
       return NextResponse.json(
         { error: "Album not found" },
         { status: 404 }
@@ -54,7 +58,8 @@ export async function PATCH(
 
     return NextResponse.json({
       success: true,
-      album: updated,
+      album,
+      isDemoMode,
     });
   } catch (error: any) {
     return NextResponse.json(
@@ -70,9 +75,9 @@ export async function DELETE(
 ) {
   try {
     const { id } = await params;
-    const deleted = deleteAlbum(id);
+    const { success, isDemoMode } = await deleteAlbumRecord(id);
 
-    if (!deleted) {
+    if (!success) {
       return NextResponse.json(
         { error: "Album not found" },
         { status: 404 }
@@ -82,6 +87,7 @@ export async function DELETE(
     return NextResponse.json({
       success: true,
       message: "Album deleted successfully. Associated memories were preserved in the archive.",
+      isDemoMode,
     });
   } catch (error: any) {
     return NextResponse.json(

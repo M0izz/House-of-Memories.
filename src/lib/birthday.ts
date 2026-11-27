@@ -3,19 +3,27 @@ export interface BirthdayConfig {
   birthMonth: number; // 1 - 12 (11 = November)
   birthDay: number; // 1 - 31 (24)
   initialYear: number; // 2027
-  timezone: string;
+  timezone: string; // Canonical IANA timezone for the space
   deliveryTime: string; // "09:00"
   widgetEnabled: boolean;
   dayBeforeReminder: boolean;
   birthdayNotifications: boolean;
 }
 
+/**
+ * The canonical shared memory-space timezone.
+ * Both users in the shared space evaluate birthday boundaries against this timezone,
+ * never independently from each user's local operating system clock.
+ */
+export const CANONICAL_SPACE_TIMEZONE =
+  process.env.NEXT_PUBLIC_SPACE_TIMEZONE || "America/New_York";
+
 export const DEFAULT_BIRTHDAY_CONFIG: BirthdayConfig = {
   recipientName: "Maya",
   birthMonth: 11,
   birthDay: 24,
   initialYear: 2027,
-  timezone: typeof Intl !== "undefined" ? Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC" : "UTC",
+  timezone: CANONICAL_SPACE_TIMEZONE,
   deliveryTime: "09:00",
   widgetEnabled: true,
   dayBeforeReminder: true,
@@ -35,12 +43,27 @@ export interface CountdownResult {
 }
 
 /**
+ * Validates an IANA timezone string. Returns the timezone if valid,
+ * or safely falls back to CANONICAL_SPACE_TIMEZONE.
+ */
+export function validateTimezone(tz?: string): string {
+  if (!tz || typeof tz !== "string") return CANONICAL_SPACE_TIMEZONE;
+  try {
+    Intl.DateTimeFormat(undefined, { timeZone: tz });
+    return tz;
+  } catch {
+    return CANONICAL_SPACE_TIMEZONE;
+  }
+}
+
+/**
  * Extracts date components for a given Date object in a specific IANA timezone.
  */
-export function getTimezoneDateParts(date: Date, timeZone: string) {
+export function getTimezoneDateParts(date: Date, timeZone: string = CANONICAL_SPACE_TIMEZONE) {
+  const safeTz = validateTimezone(timeZone);
   try {
     const formatter = new Intl.DateTimeFormat("en-US", {
-      timeZone,
+      timeZone: safeTz,
       year: "numeric",
       month: "numeric",
       day: "numeric",
@@ -63,16 +86,53 @@ export function getTimezoneDateParts(date: Date, timeZone: string) {
       second: getPart("second"),
     };
   } catch {
-    // Fallback if timezone string is invalid
     return {
-      year: date.getFullYear(),
-      month: date.getMonth() + 1,
-      day: date.getDate(),
-      hour: date.getHours(),
-      minute: date.getMinutes(),
-      second: date.getSeconds(),
+      year: date.getUTCFullYear(),
+      month: date.getUTCMonth() + 1,
+      day: date.getUTCDate(),
+      hour: date.getUTCHours(),
+      minute: date.getUTCMinutes(),
+      second: date.getUTCSeconds(),
     };
   }
+}
+
+/**
+ * Calculates the exact UTC Date instant for a given year, month, day, hour, minute, second
+ * in the specified canonical IANA timezone.
+ */
+export function getZonedInstant(
+  year: number,
+  month: number, // 1-12
+  day: number,   // 1-31
+  hour: number = 0,
+  minute: number = 0,
+  second: number = 0,
+  timeZone: string = CANONICAL_SPACE_TIMEZONE
+): Date {
+  const validTz = validateTimezone(timeZone);
+
+  // Initial naive guess in UTC
+  let targetUtcMs = Date.UTC(year, month - 1, day, hour, minute, second);
+
+  // Iteratively converge on the exact UTC instant whose local representation in validTz matches
+  for (let i = 0; i < 3; i++) {
+    const parts = getTimezoneDateParts(new Date(targetUtcMs), validTz);
+    const localUtcMs = Date.UTC(
+      parts.year,
+      parts.month - 1,
+      parts.day,
+      parts.hour,
+      parts.minute,
+      parts.second
+    );
+    const desiredLocalMs = Date.UTC(year, month - 1, day, hour, minute, second);
+    const diff = desiredLocalMs - localUtcMs;
+    if (diff === 0) break;
+    targetUtcMs += diff;
+  }
+
+  return new Date(targetUtcMs);
 }
 
 /**
@@ -80,49 +140,50 @@ export function getTimezoneDateParts(date: Date, timeZone: string) {
  * Supports:
  * - Recurring annually on month/day without hardcoding future years
  * - Initial target floor (e.g., Nov 24, 2027)
- * - Celebration state on the exact birthday date in the configured timezone
+ * - Canonical shared memory-space timezone
+ * - Celebration state for the entire 24-hour instant window in that timezone
  * - Automatic rollover to the following year once the birthday has passed
  */
 export function getNextBirthday(
   now: Date = new Date(),
   config: Partial<BirthdayConfig> = {}
-): { nextDate: Date; isBirthday: boolean; targetYear: number } {
+): { nextDate: Date; isBirthday: boolean; targetYear: number; birthdayStart: Date; birthdayEnd: Date } {
   const birthMonth = config.birthMonth ?? DEFAULT_BIRTHDAY_CONFIG.birthMonth; // 11
   const birthDay = config.birthDay ?? DEFAULT_BIRTHDAY_CONFIG.birthDay; // 24
   const initialYear = config.initialYear ?? DEFAULT_BIRTHDAY_CONFIG.initialYear; // 2027
-  const timezone = config.timezone ?? DEFAULT_BIRTHDAY_CONFIG.timezone;
+  const timezone = validateTimezone(config.timezone ?? DEFAULT_BIRTHDAY_CONFIG.timezone);
 
-  // Extract current date components strictly in the configured timezone
+  // Extract current date components strictly in the shared canonical space timezone
   const tzParts = getTimezoneDateParts(now, timezone);
   const currentYear = tzParts.year;
-  const currentMonth = tzParts.month;
-  const currentDate = tzParts.day;
-
-  // Check if today is the birthday in the configured timezone
-  const isTodayBirthday = currentMonth === birthMonth && currentDate === birthDay && currentYear >= initialYear;
 
   let targetYear = currentYear;
-
   if (currentYear < initialYear) {
     targetYear = initialYear;
-  } else {
-    // Check if we are before, on, or past the birthday in this year
-    if (currentMonth < birthMonth || (currentMonth === birthMonth && currentDate < birthDay)) {
-      targetYear = currentYear;
-    } else if (isTodayBirthday) {
-      targetYear = currentYear;
-    } else {
-      targetYear = currentYear + 1;
-    }
   }
 
-  // Target birthday midnight in the target year
-  const nextDate = new Date(Date.UTC(targetYear, birthMonth - 1, birthDay, 0, 0, 0, 0));
+  // Calculate birthday start (00:00:00) and end (24:00:00 / next day 00:00:00) instants
+  let birthdayStart = getZonedInstant(targetYear, birthMonth, birthDay, 0, 0, 0, timezone);
+  let birthdayEnd = getZonedInstant(targetYear, birthMonth, birthDay + 1, 0, 0, 0, timezone);
+
+  const nowMs = now.getTime();
+
+  // If we're already past this targetYear's birthday celebration window, roll forward to targetYear + 1
+  if (nowMs >= birthdayEnd.getTime()) {
+    targetYear = Math.max(initialYear, currentYear + 1);
+    birthdayStart = getZonedInstant(targetYear, birthMonth, birthDay, 0, 0, 0, timezone);
+    birthdayEnd = getZonedInstant(targetYear, birthMonth, birthDay + 1, 0, 0, 0, timezone);
+  }
+
+  const isBirthday = nowMs >= birthdayStart.getTime() && nowMs < birthdayEnd.getTime();
+  const nextDate = isBirthday ? birthdayEnd : birthdayStart;
 
   return {
     nextDate,
-    isBirthday: isTodayBirthday,
+    isBirthday,
     targetYear,
+    birthdayStart,
+    birthdayEnd,
   };
 }
 
@@ -133,9 +194,9 @@ export function calculateCountdown(
   now: Date = new Date(),
   config: Partial<BirthdayConfig> = {}
 ): CountdownResult {
-  const { nextDate, isBirthday, targetYear } = getNextBirthday(now, config);
+  const { nextDate, isBirthday, targetYear, birthdayStart } = getNextBirthday(now, config);
 
-  const diffMs = nextDate.getTime() - now.getTime();
+  const diffMs = (isBirthday ? nextDate.getTime() : birthdayStart.getTime()) - now.getTime();
   const totalSeconds = Math.max(0, Math.floor(diffMs / 1000));
 
   const days = Math.floor(totalSeconds / (3600 * 24));
@@ -143,11 +204,13 @@ export function calculateCountdown(
   const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
 
-  const formattedTargetDate = nextDate.toLocaleDateString("en-US", {
+  const validTz = validateTimezone(config.timezone ?? DEFAULT_BIRTHDAY_CONFIG.timezone);
+  const formattedTargetDate = new Intl.DateTimeFormat("en-US", {
+    timeZone: validTz,
     month: "long",
     day: "numeric",
     year: "numeric",
-  });
+  }).format(birthdayStart);
 
   return {
     days,

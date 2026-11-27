@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { removeMemoryFromAlbum } from "@/lib/albums-store";
+import { unlinkMemoryFromAlbum } from "@/lib/repositories/memory-repository";
 
 export async function DELETE(
   request: Request,
@@ -7,9 +7,9 @@ export async function DELETE(
 ) {
   try {
     const { id: albumId, memoryId } = await params;
-    const removed = removeMemoryFromAlbum(albumId, memoryId);
+    const { success, isDemoMode } = await unlinkMemoryFromAlbum(albumId, memoryId);
 
-    if (!removed) {
+    if (!success) {
       return NextResponse.json(
         { error: "Memory was not found in this album" },
         { status: 404 }
@@ -19,6 +19,7 @@ export async function DELETE(
     return NextResponse.json({
       success: true,
       message: "Memory removed from album. Original memory remains preserved in archive.",
+      isDemoMode,
     });
   } catch (error: any) {
     return NextResponse.json(

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import {
@@ -14,43 +14,72 @@ import {
   Clock,
   Mail,
   PartyPopper,
-  Compass,
-  Bookmark,
+  Camera,
+  FolderPlus,
+  Loader2,
 } from "lucide-react";
 import { format } from "date-fns";
 import { cn } from "@/lib/utils";
 import { calculateCountdown } from "@/lib/birthday";
-import {
-  SAMPLE_MEMORIES,
-  SAMPLE_MILESTONES,
-  SAMPLE_ALBUMS,
-  Memory,
-} from "@/lib/sample-data";
+import { Memory } from "@/lib/sample-data";
+import { AlbumRecord } from "@/lib/albums-store";
 
 export default function HomePage() {
+  const [memories, setMemories] = useState<Memory[]>([]);
+  const [albums, setAlbums] = useState<AlbumRecord[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
   const [featuredIndex, setFeaturedIndex] = useState(0);
   const [isShuffling, setIsShuffling] = useState(false);
   const [isSimulatedBirthday, setIsSimulatedBirthday] = useState(false);
 
-  const featuredMemory: Memory = SAMPLE_MEMORIES[featuredIndex];
+  useEffect(() => {
+    async function loadDashboardData() {
+      try {
+        setIsLoading(true);
+        const [memRes, albRes] = await Promise.all([
+          fetch("/api/memories"),
+          fetch("/api/albums"),
+        ]);
+        if (memRes.ok) {
+          const memData = await memRes.json();
+          setMemories(memData.memories || []);
+        }
+        if (albRes.ok) {
+          const albData = await albRes.json();
+          setAlbums(albData.albums || []);
+        }
+      } catch (err) {
+        console.error("Failed to load dashboard data:", err);
+      } finally {
+        setIsLoading(false);
+      }
+    }
+
+    loadDashboardData();
+  }, []);
+
   const today = new Date();
   const formattedToday = format(today, "EEEE, MMMM do, yyyy");
 
-  // Shared timezone-aware birthday countdown (Target: November 24)
+  // Shared canonical timezone-aware birthday countdown (Target: November 24)
   const countdown = calculateCountdown(today);
   const daysUntilBirthday = countdown.days;
   const isCelebrationActive = countdown.isBirthday || isSimulatedBirthday;
 
+  const featuredMemory: Memory | null =
+    memories.length > 0 ? memories[featuredIndex % memories.length] : null;
+
   const handleNextFeatured = () => {
+    if (memories.length <= 1) return;
     setIsShuffling(true);
     setTimeout(() => {
-      setFeaturedIndex((prev) => (prev + 1) % SAMPLE_MEMORIES.length);
+      setFeaturedIndex((prev) => (prev + 1) % memories.length);
       setIsShuffling(false);
     }, 280);
   };
 
-  // Find a memory for "On This Day / In this Season"
-  const onThisDayMemory = SAMPLE_MEMORIES[1]; // Old Town Coffee memory
+  const onThisDayMemory: Memory | null =
+    memories.length > 1 ? memories[1] : memories[0] || null;
 
   return (
     <div className="space-y-12 animate-fade-in pb-16 max-w-6xl mx-auto">
@@ -71,7 +100,15 @@ export default function HomePage() {
           </p>
 
           <p className="text-xs text-plum/60 font-sans pt-0.5">
-            {formattedToday} · 2 friends · {SAMPLE_MEMORIES.length * 7} moments recorded
+            {formattedToday} · 2 friends ·{" "}
+            {isLoading ? (
+              <span>loading archive...</span>
+            ) : (
+              <span>
+                {memories.length} {memories.length === 1 ? "memory" : "memories"} recorded ·{" "}
+                {albums.length} {albums.length === 1 ? "album" : "albums"}
+              </span>
+            )}
           </p>
         </div>
 
@@ -134,9 +171,9 @@ export default function HomePage() {
         </section>
       ) : null}
 
-      {/* 3. Main Experience Row: Featured Memory (Scrapbook Polaroid) + Curated Discovery Cards */}
+      {/* 3. Main Experience Row: Featured Memory + Curated Discovery Cards */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-        {/* Featured Memory — The Emotional Anchor (7 cols on lg) */}
+        {/* Featured Memory Container (7 cols on lg) */}
         <div className="lg:col-span-7 bg-white rounded-3xl p-6 sm:p-8 border border-plum/10 shadow-paper relative space-y-6">
           <div className="washi-tape" />
 
@@ -151,111 +188,140 @@ export default function HomePage() {
               </h2>
             </div>
 
-            <button
-              onClick={handleNextFeatured}
-              disabled={isShuffling}
-              className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-cream-300 hover:bg-cream-400 text-plum text-xs font-medium transition-all border border-plum/10 active:scale-95 disabled:opacity-50"
-              title="Shuffle another memory"
-            >
-              <Shuffle className={cn("w-3.5 h-3.5", isShuffling && "animate-spin")} />
-              <span>Next Moment</span>
-            </button>
-          </div>
-
-          {/* Living Polaroid Presentation */}
-          <div
-            className={cn(
-              "polaroid-card bg-cream-100 transition-all duration-300",
-              isShuffling ? "scale-98 opacity-60 blur-[1px]" : "scale-100 opacity-100"
+            {memories.length > 1 && (
+              <button
+                onClick={handleNextFeatured}
+                disabled={isShuffling}
+                className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-cream-300 hover:bg-cream-400 text-plum text-xs font-medium transition-all border border-plum/10 active:scale-95 disabled:opacity-50"
+                title="Shuffle another memory"
+              >
+                <Shuffle className={cn("w-3.5 h-3.5", isShuffling && "animate-spin")} />
+                <span>Next Moment</span>
+              </button>
             )}
-          >
-            {/* The Actual Rich Photograph */}
-            <div className="w-full aspect-[16/10] sm:aspect-[16/9] rounded-lg overflow-hidden relative shadow-inner bg-cream-300">
-              <Image
-                src={featuredMemory.imageUrl}
-                alt={featuredMemory.title}
-                fill
-                priority
-                sizes="(max-width: 768px) 100vw, 650px"
-                className="object-cover transition-transform duration-700 hover:scale-105"
-              />
-              <div className="absolute top-3 right-3 px-2.5 py-1 rounded-full bg-white/85 backdrop-blur-sm text-plum text-[11px] font-medium flex items-center gap-1 shadow-sm">
-                <Heart className="w-3 h-3 fill-blush text-plum" />
-                <span>Core memory</span>
-              </div>
-            </div>
-
-            {/* Handwritten & Editorial Caption Details */}
-            <div className="pt-5 pb-2 px-2 space-y-2.5">
-              <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-plum/60 border-b border-plum/10 pb-2.5">
-                <div className="flex items-center gap-1.5">
-                  <Calendar className="w-3.5 h-3.5 text-plum/50" />
-                  <span className="font-medium text-plum/80">{featuredMemory.date}</span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <MapPin className="w-3.5 h-3.5 text-plum/50" />
-                  <span>{featuredMemory.location}</span>
-                </div>
-                <span className="text-[11px] font-handwriting text-plum/70 px-2 py-0.5 rounded-full bg-cream-300/80">
-                  saved by {featuredMemory.author}
-                </span>
-              </div>
-
-              <h3 className="font-serif text-xl font-bold text-plum">
-                {featuredMemory.title}
-              </h3>
-
-              <p className="font-handwriting text-xl text-plum/85 leading-relaxed">
-                &ldquo;{featuredMemory.caption}&rdquo;
-              </p>
-
-              <p className="text-xs text-plum/75 leading-relaxed font-sans pt-1">
-                {featuredMemory.story}
-              </p>
-            </div>
           </div>
+
+          {/* Featured Content: Real Memory or Elegant Empty State */}
+          {featuredMemory ? (
+            <div
+              className={cn(
+                "polaroid-card bg-cream-100 transition-all duration-300",
+                isShuffling ? "scale-98 opacity-60 blur-[1px]" : "scale-100 opacity-100"
+              )}
+            >
+              <div className="w-full aspect-[16/10] sm:aspect-[16/9] rounded-lg overflow-hidden relative shadow-inner bg-cream-300">
+                <Image
+                  src={featuredMemory.imageUrl}
+                  alt={featuredMemory.title}
+                  fill
+                  priority
+                  sizes="(max-width: 768px) 100vw, 650px"
+                  className="object-cover transition-transform duration-700 hover:scale-105"
+                />
+                <div className="absolute top-3 right-3 px-2.5 py-1 rounded-full bg-white/85 backdrop-blur-sm text-plum text-[11px] font-medium flex items-center gap-1 shadow-sm">
+                  <Heart className="w-3 h-3 fill-blush text-plum" />
+                  <span>Core memory</span>
+                </div>
+              </div>
+
+              <div className="pt-5 pb-2 px-2 space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-plum/60 border-b border-plum/10 pb-2.5">
+                  <div className="flex items-center gap-1.5">
+                    <Calendar className="w-3.5 h-3.5 text-plum/50" />
+                    <span className="font-medium text-plum/80">{featuredMemory.date}</span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <MapPin className="w-3.5 h-3.5 text-plum/50" />
+                    <span>{featuredMemory.location}</span>
+                  </div>
+                  <span className="text-[11px] font-handwriting text-plum/70 px-2 py-0.5 rounded-full bg-cream-300/80">
+                    saved by {featuredMemory.author}
+                  </span>
+                </div>
+
+                <h3 className="font-serif text-xl font-bold text-plum">
+                  {featuredMemory.title}
+                </h3>
+
+                {featuredMemory.caption && (
+                  <p className="font-handwriting text-xl text-plum/85 leading-relaxed">
+                    &ldquo;{featuredMemory.caption}&rdquo;
+                  </p>
+                )}
+
+                {featuredMemory.story && (
+                  <p className="text-xs text-plum/75 leading-relaxed font-sans pt-1">
+                    {featuredMemory.story}
+                  </p>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="border-2 border-dashed border-plum/20 rounded-2xl p-10 text-center space-y-3 bg-cream/30">
+              <div className="w-12 h-12 rounded-full bg-blush/60 text-plum mx-auto flex items-center justify-center">
+                <Camera className="w-6 h-6 text-plum/70" />
+              </div>
+              <h3 className="font-serif text-lg font-bold text-plum">
+                A place waiting for our first moment.
+              </h3>
+              <p className="text-xs text-plum/60 max-w-sm mx-auto font-sans leading-relaxed">
+                Your private archive is completely empty. Upload our very first photograph or entire folder to bring this home to life!
+              </p>
+              <Link
+                href="/memories"
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-plum text-cream text-xs font-semibold shadow-paper hover:bg-plum-light transition-all"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>Upload First Memory</span>
+              </Link>
+            </div>
+          )}
         </div>
 
         {/* Right Column: Portals & Memory Rediscovery (5 cols on lg) */}
         <div className="lg:col-span-5 space-y-6">
-          {/* A Memory From One Year Ago / In this Season */}
-          <div className="bg-white rounded-3xl p-6 border border-plum/10 shadow-paper relative space-y-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Clock className="w-4 h-4 text-plum/60" />
-                <span className="text-[11px] font-semibold text-plum/60 uppercase tracking-wider">
-                  Remember When
+          {/* A Memory From One Year Ago or Season */}
+          {onThisDayMemory ? (
+            <div className="bg-white rounded-3xl p-6 border border-plum/10 shadow-paper relative space-y-4">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Clock className="w-4 h-4 text-plum/60" />
+                  <span className="text-[11px] font-semibold text-plum/60 uppercase tracking-wider">
+                    Remember When
+                  </span>
+                </div>
+                <span className="text-xs px-2.5 py-0.5 rounded-full bg-sage text-plum font-medium">
+                  Relive This
                 </span>
               </div>
-              <span className="text-xs px-2.5 py-0.5 rounded-full bg-sage text-plum font-medium">
-                One Year Ago
-              </span>
-            </div>
 
-            <div className="flex gap-4 items-center">
-              <div className="w-20 h-20 rounded-2xl overflow-hidden relative flex-shrink-0 border border-plum/10 shadow-sm rotate-2">
-                <Image
-                  src={onThisDayMemory.imageUrl}
-                  alt={onThisDayMemory.title}
-                  fill
-                  sizes="80px"
-                  className="object-cover"
-                />
-              </div>
+              <div className="flex gap-4 items-center">
+                <div className="w-20 h-20 rounded-2xl overflow-hidden relative flex-shrink-0 border border-plum/10 shadow-sm rotate-2">
+                  <Image
+                    src={onThisDayMemory.imageUrl}
+                    alt={onThisDayMemory.title}
+                    fill
+                    sizes="80px"
+                    className="object-cover"
+                  />
+                </div>
 
-              <div className="space-y-1 min-w-0">
-                <h4 className="font-serif text-base font-bold text-plum truncate">
-                  {onThisDayMemory.title}
-                </h4>
-                <p className="font-handwriting text-sm text-plum/80 line-clamp-2">
-                  &ldquo;{onThisDayMemory.caption}&rdquo;
-                </p>
-                <span className="text-[11px] text-plum/50 block">
-                  {onThisDayMemory.location} · {onThisDayMemory.date}
-                </span>
+                <div className="space-y-1 min-w-0">
+                  <h4 className="font-serif text-base font-bold text-plum truncate">
+                    {onThisDayMemory.title}
+                  </h4>
+                  {onThisDayMemory.caption && (
+                    <p className="font-handwriting text-sm text-plum/80 line-clamp-2">
+                      &ldquo;{onThisDayMemory.caption}&rdquo;
+                    </p>
+                  )}
+                  <span className="text-[11px] text-plum/50 block">
+                    {onThisDayMemory.location} · {onThisDayMemory.date}
+                  </span>
+                </div>
               </div>
             </div>
-          </div>
+          ) : null}
 
           {/* Open When Letters Portal */}
           <Link
@@ -267,7 +333,7 @@ export default function HomePage() {
                 <Mail className="w-5 h-5 text-plum/70" />
               </div>
               <span className="text-xs font-handwriting text-plum/70 bg-white/70 px-2.5 py-1 rounded-full">
-                4 sealed envelopes
+                Sealed envelopes
               </span>
             </div>
 
@@ -302,7 +368,7 @@ export default function HomePage() {
               Memory Lane
             </h3>
             <p className="text-xs text-plum/70 font-sans mt-1">
-              Spin the wheel of time and discover a completely randomized photograph from our archive.
+              Spin the wheel of time and discover a randomized moment from our shared archive.
             </p>
 
             <div className="flex items-center gap-1 text-xs font-semibold text-plum mt-3">
@@ -311,7 +377,7 @@ export default function HomePage() {
             </div>
           </Link>
 
-          {/* Birthday Anticipation (When not in birthday mode) */}
+          {/* Birthday Anticipation (When not in celebration mode) */}
           {!isCelebrationActive && (
             <div className="bg-cream-100 rounded-3xl p-6 border border-plum/10 shadow-paper space-y-3">
               <div className="flex items-center justify-between text-xs text-plum/60 uppercase tracking-wider font-semibold">
@@ -323,14 +389,14 @@ export default function HomePage() {
                   Upcoming Birthday
                 </h4>
                 <p className="text-xs text-plum/70">
-                  {daysUntilBirthday} days until our next big private celebration.
+                  {daysUntilBirthday} days until our big celebration on November 24.
                 </p>
               </div>
               <Link
                 href="/birthday"
                 className="text-xs font-semibold text-plum/80 hover:text-plum flex items-center gap-1 group"
               >
-                <span>View celebration preview</span>
+                <span>View celebration details</span>
                 <ArrowRight className="w-3 h-3 group-hover:translate-x-1 transition-transform" />
               </Link>
             </div>
@@ -338,7 +404,7 @@ export default function HomePage() {
         </div>
       </div>
 
-      {/* 4. OUR STORY, SO FAR — Milestone Timeline Glimpse */}
+      {/* 4. OUR STORY, SO FAR — Latest Archive Moments */}
       <section className="space-y-6 pt-4">
         <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-2 border-b border-plum/10 pb-4">
           <div>
@@ -349,72 +415,77 @@ export default function HomePage() {
               Every moment matters.
             </h2>
             <p className="text-xs sm:text-sm text-plum/70 font-sans">
-              A glimpse of our friendship timeline from the very first days.
+              Recent memories added to our shared scrapbook.
             </p>
           </div>
 
           <Link
-            href="/timeline"
+            href="/memories"
             className="text-xs font-semibold text-plum/80 hover:text-plum flex items-center gap-1 group"
           >
-            <span>Explore full timeline</span>
+            <span>View all memories</span>
             <ArrowRight className="w-3.5 h-3.5 group-hover:translate-x-1 transition-transform" />
           </Link>
         </div>
 
-        {/* Varied Scrapbook Milestone Cards Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          {SAMPLE_MILESTONES.map((milestone, idx) => {
-            const rotations = ["-rotate-1", "rotate-1", "-rotate-0.5"];
-            const rot = rotations[idx % rotations.length];
+        {memories.length === 0 ? (
+          <div className="bg-white rounded-3xl p-8 border border-plum/10 text-center space-y-2">
+            <p className="font-serif text-lg text-plum">No memories added yet.</p>
+            <p className="text-xs text-plum/60">Our timeline will begin as soon as you record your first memory.</p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            {memories.slice(0, 3).map((mem, idx) => {
+              const rotations = ["-rotate-1", "rotate-1", "-rotate-0.5"];
+              const rot = rotations[idx % rotations.length];
 
-            return (
-              <div
-                key={milestone.id}
-                className={cn(
-                  "polaroid-card bg-white transition-all group cursor-pointer",
-                  rot
-                )}
-              >
-                {/* Milestone Photo */}
-                <div className="w-full aspect-[4/3] rounded-lg overflow-hidden relative bg-cream-300 mb-3 shadow-inner">
-                  <Image
-                    src={milestone.imageUrl}
-                    alt={milestone.title}
-                    fill
-                    sizes="(max-width: 768px) 100vw, 350px"
-                    className="object-cover group-hover:scale-105 transition-transform duration-500"
-                  />
-                  {milestone.isCore && (
-                    <div className="absolute top-2 left-2 px-2 py-0.5 rounded-full bg-white/90 text-plum text-[10px] font-medium shadow-sm">
-                      Milestone
-                    </div>
+              return (
+                <div
+                  key={mem.id}
+                  className={cn(
+                    "polaroid-card bg-white transition-all group cursor-pointer",
+                    rot
                   )}
-                </div>
-
-                <div className="space-y-1.5 px-1">
-                  <div className="flex items-center justify-between text-[11px] text-plum/50">
-                    <span>{milestone.date}</span>
-                    <span className="font-handwriting text-xs text-plum/70">
-                      {milestone.location}
-                    </span>
+                >
+                  <div className="w-full aspect-[4/3] rounded-lg overflow-hidden relative bg-cream-300 mb-3 shadow-inner">
+                    <Image
+                      src={mem.imageUrl}
+                      alt={mem.title}
+                      fill
+                      sizes="(max-width: 768px) 100vw, 350px"
+                      className="object-cover group-hover:scale-105 transition-transform duration-500"
+                    />
+                    <div className="absolute top-2 left-2 px-2 py-0.5 rounded-full bg-white/90 text-plum text-[10px] font-medium shadow-sm">
+                      {mem.tag}
+                    </div>
                   </div>
 
-                  <h3 className="font-serif text-base font-bold text-plum group-hover:text-plum-light transition-colors">
-                    {milestone.title}
-                  </h3>
+                  <div className="space-y-1.5 px-1">
+                    <div className="flex items-center justify-between text-[11px] text-plum/50">
+                      <span>{mem.date}</span>
+                      <span className="font-handwriting text-xs text-plum/70">
+                        {mem.location}
+                      </span>
+                    </div>
 
-                  <p className="text-xs text-plum/70 leading-relaxed font-sans line-clamp-2">
-                    {milestone.description}
-                  </p>
+                    <h3 className="font-serif text-base font-bold text-plum group-hover:text-plum-light transition-colors truncate">
+                      {mem.title}
+                    </h3>
+
+                    {mem.caption && (
+                      <p className="text-xs text-plum/70 leading-relaxed font-sans line-clamp-2">
+                        {mem.caption}
+                      </p>
+                    )}
+                  </div>
                 </div>
-              </div>
-            );
-          })}
-        </div>
+              );
+            })}
+          </div>
+        )}
       </section>
 
-      {/* 5. Living Albums Preview — Actual Multi-Photo Stack Effect */}
+      {/* 5. Living Albums Preview */}
       <section className="space-y-6 pt-4">
         <div className="flex items-center justify-between border-b border-plum/10 pb-4">
           <div>
@@ -435,41 +506,56 @@ export default function HomePage() {
           </Link>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-8">
-          {SAMPLE_ALBUMS.map((album) => (
+        {albums.length === 0 ? (
+          <div className="bg-white rounded-3xl p-8 border border-plum/10 text-center space-y-3">
+            <FolderPlus className="w-8 h-8 text-plum/40 mx-auto" />
+            <p className="font-serif text-lg text-plum">No albums created yet.</p>
+            <p className="text-xs text-plum/60">Organize your trips, quiet afternoons, and celebrations into shared albums.</p>
             <Link
-              key={album.id}
-              href={`/albums/${album.id}`}
-              className="group block"
+              href="/albums"
+              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full bg-plum text-cream text-xs font-semibold"
             >
-              {/* Photo Stack Effect */}
-              <div className="photo-stack mb-4 aspect-[4/3] rounded-2xl overflow-hidden relative border border-plum/10 shadow-paper group-hover:shadow-float transition-all">
-                <Image
-                  src={album.coverImage}
-                  alt={album.title}
-                  fill
-                  sizes="(max-width: 768px) 100vw, 350px"
-                  className="object-cover group-hover:scale-105 transition-transform duration-500"
-                />
-                <div className="absolute inset-0 bg-gradient-to-t from-plum/60 via-transparent to-transparent opacity-60 group-hover:opacity-40 transition-opacity" />
-                <div className="absolute bottom-3 left-3 text-white">
-                  <span className="text-[11px] font-medium bg-black/30 backdrop-blur-sm px-2 py-0.5 rounded-full">
-                    {album.memoryCount} moments
-                  </span>
-                </div>
-              </div>
-
-              <div className="space-y-0.5 px-1">
-                <h3 className="font-serif text-base font-bold text-plum group-hover:text-plum-light transition-colors">
-                  {album.title}
-                </h3>
-                <p className="font-handwriting text-sm text-plum/60">
-                  Collection · {album.theme}
-                </p>
-              </div>
+              <span>Create First Album</span>
             </Link>
-          ))}
-        </div>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-8">
+            {albums.slice(0, 3).map((album) => (
+              <Link
+                key={album.id}
+                href={`/albums/${album.id}`}
+                className="group block"
+              >
+                <div className="photo-stack mb-4 aspect-[4/3] rounded-2xl overflow-hidden relative border border-plum/10 shadow-paper group-hover:shadow-float transition-all">
+                  <Image
+                    src={album.coverImageUrl}
+                    alt={album.title}
+                    fill
+                    sizes="(max-width: 768px) 100vw, 350px"
+                    className="object-cover group-hover:scale-105 transition-transform duration-500"
+                  />
+                  <div className="absolute inset-0 bg-gradient-to-t from-plum/60 via-transparent to-transparent opacity-60 group-hover:opacity-40 transition-opacity" />
+                  <div className="absolute bottom-3 left-3 text-white">
+                    <span className="text-[11px] font-medium bg-black/30 backdrop-blur-sm px-2 py-0.5 rounded-full">
+                      {album.memoryCount ?? 0} {(album.memoryCount ?? 0) === 1 ? "memory" : "memories"}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="space-y-0.5 px-1">
+                  <h3 className="font-serif text-base font-bold text-plum group-hover:text-plum-light transition-colors">
+                    {album.title}
+                  </h3>
+                  {album.description && (
+                    <p className="font-sans text-xs text-plum/60 line-clamp-1">
+                      {album.description}
+                    </p>
+                  )}
+                </div>
+              </Link>
+            ))}
+          </div>
+        )}
       </section>
     </div>
   );

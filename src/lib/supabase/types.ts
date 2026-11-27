@@ -56,6 +56,8 @@ export type Database = {
           title: string;
           description: string | null;
           cover_memory_id: string | null;
+          cover_image_url: string | null;
+          is_favorite: boolean;
           created_by: string;
           created_at: string;
           updated_at: string;
@@ -66,6 +68,8 @@ export type Database = {
           title: string;
           description?: string | null;
           cover_memory_id?: string | null;
+          cover_image_url?: string | null;
+          is_favorite?: boolean;
           created_by: string;
           created_at?: string;
           updated_at?: string;
@@ -76,9 +80,34 @@ export type Database = {
           title?: string;
           description?: string | null;
           cover_memory_id?: string | null;
+          cover_image_url?: string | null;
+          is_favorite?: boolean;
           created_by?: string;
           created_at?: string;
           updated_at?: string;
+        };
+      };
+      album_memories: {
+        Row: {
+          id: string;
+          album_id: string;
+          memory_id: string;
+          added_by: string;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          album_id: string;
+          memory_id: string;
+          added_by: string;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          album_id?: string;
+          memory_id?: string;
+          added_by?: string;
+          created_at?: string;
         };
       };
       memories: {

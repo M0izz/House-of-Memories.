@@ -1,20 +1,20 @@
 import { NextResponse } from "next/server";
-import { listAlbums, createAlbum, getTotalArchiveStats, AlbumSortOption } from "@/lib/albums-store";
+import { fetchAlbums, createAlbumRecord } from "@/lib/repositories/memory-repository";
 
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
     const search = searchParams.get("search") || undefined;
-    const sort = (searchParams.get("sort") as AlbumSortOption) || "recently_updated";
+    const sort = (searchParams.get("sort") as any) || "recently_updated";
 
-    const albums = listAlbums({ search, sort });
-    const stats = getTotalArchiveStats();
+    const result = await fetchAlbums({ search, sort });
 
     return NextResponse.json({
       success: true,
-      albums,
-      totalAlbums: stats.totalAlbums,
-      totalMemories: stats.totalMemories,
+      albums: result.albums,
+      totalAlbums: result.totalAlbums,
+      totalMemories: result.totalMemories,
+      isDemoMode: result.isDemoMode,
     });
   } catch (error: any) {
     return NextResponse.json(
@@ -27,7 +27,7 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { title, description, coverImageUrl, createdBy = "Alex" } = body;
+    const { title, description, coverImageUrl, createdBy } = body;
 
     if (!title || !title.trim()) {
       return NextResponse.json(
@@ -36,7 +36,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const album = createAlbum({
+    const { album, isDemoMode } = await createAlbumRecord({
       title,
       description,
       coverImageUrl,
@@ -46,6 +46,7 @@ export async function POST(request: Request) {
     return NextResponse.json({
       success: true,
       album,
+      isDemoMode,
     });
   } catch (error: any) {
     return NextResponse.json(

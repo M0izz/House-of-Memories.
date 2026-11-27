@@ -1,12 +1,16 @@
 import { NextResponse } from "next/server";
-import { listAllMemories, createMemory } from "@/lib/albums-store";
+import {
+  fetchAllMemories,
+  insertMemoryRecord,
+} from "@/lib/repositories/memory-repository";
 
 export async function GET() {
   try {
-    const memories = listAllMemories();
+    const { memories, isDemoMode } = await fetchAllMemories();
     return NextResponse.json({
       success: true,
       memories,
+      isDemoMode,
     });
   } catch (error: any) {
     return NextResponse.json(
@@ -23,18 +27,21 @@ export async function POST(request: Request) {
 
     // Support both single memory and bulk memories (e.g. from folder upload)
     if (Array.isArray(items) && items.length > 0) {
-      const created = items.map((item: any) => createMemory(item));
+      const createdPromises = items.map((item: any) => insertMemoryRecord(item));
+      const createdResults = await Promise.all(createdPromises);
       return NextResponse.json({
         success: true,
-        count: created.length,
-        memories: created,
+        count: createdResults.length,
+        memories: createdResults.map((r) => r.memory),
+        isDemoMode: createdResults[0]?.isDemoMode ?? false,
       });
     }
 
-    const memory = createMemory(singleItem);
+    const { memory, isDemoMode } = await insertMemoryRecord(singleItem);
     return NextResponse.json({
       success: true,
       memory,
+      isDemoMode,
     });
   } catch (error: any) {
     return NextResponse.json(

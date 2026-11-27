@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { addMemoriesToAlbum } from "@/lib/albums-store";
+import { linkMemoriesToAlbum } from "@/lib/repositories/memory-repository";
 
 export async function POST(
   request: Request,
@@ -8,7 +8,7 @@ export async function POST(
   try {
     const { id: albumId } = await params;
     const body = await request.json();
-    const { memoryIds = [], addedBy = "Alex" } = body;
+    const { memoryIds = [] } = body;
 
     if (!Array.isArray(memoryIds) || memoryIds.length === 0) {
       return NextResponse.json(
@@ -17,19 +17,13 @@ export async function POST(
       );
     }
 
-    const result = addMemoriesToAlbum(albumId, memoryIds, addedBy);
-
-    if (!result.album) {
-      return NextResponse.json(
-        { error: "Album not found" },
-        { status: 404 }
-      );
-    }
+    const result = await linkMemoriesToAlbum(albumId, memoryIds);
 
     return NextResponse.json({
       success: true,
       addedCount: result.addedCount,
       duplicateCount: result.duplicateCount,
+      isDemoMode: result.isDemoMode,
       message: `Added ${result.addedCount} ${result.addedCount === 1 ? "memory" : "memories"} to album.`,
     });
   } catch (error: any) {
