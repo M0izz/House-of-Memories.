@@ -1,0 +1,49 @@
+{
+  "name": "house-of-memories",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A private digital home for shared memories — a two-person memory archive application.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "db:push": "npx supabase db push",
+    "db:gen": "npx supabase gen types typescript --local > src/lib/supabase/types.ts"
+  },
+  "dependencies": {
+    "@hookform/resolvers": "^3.9.0",
+    "@supabase/ssr": "^0.5.2",
+    "@supabase/supabase-js": "^2.48.0",
+    "autoprefixer": "^10.4.19",
+    "clsx": "^2.1.1",
+    "date-fns": "^3.6.0",
+    "drizzle-orm": "^0.36.4",
+    "idb": "^8.0.0",
+    "lucide-react": "^0.460.0",
+    "maplibre-gl": "^4.7.1",
+    "motion": "^12.0.0",
+    "next": "^15.0.0",
+    "postcss": "^8.4.38",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-hook-form": "^7.54.0",
+    "sonner": "^1.7.0",
+    "tailwind-merge": "^2.5.4",
+    "tailwindcss": "^3.4.4",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@ianvs/prettier-plugin-sort-imports": "^4.3.1",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "eslint": "^9.0.0",
+    "eslint-config-next": "^15.0.0",
+    "prettier": "^3.3.3",
+    "typescript": "^5.4.5"
+  },
+  "engines": {
+    "node": ">=20.x"
+  }
+}

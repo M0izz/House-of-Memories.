@@ -1,0 +1,19 @@
+name = "house-of-memories-notifications"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+
+[triggers]
+crons = ["*/15 * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "house-of-memories-db"
+database_id = "your-d1-database-id"
+
+[vars]
+ENVIRONMENT = "production"
+VAPID_PUBLIC_KEY = "BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLXYp5Nksh8U"
+APP_URL = "https://house-of-memories.vercel.app"
+
+# VAPID_PRIVATE_KEY should be set via Cloudflare Worker Secrets:
+# wrangler secret put VAPID_PRIVATE_KEY

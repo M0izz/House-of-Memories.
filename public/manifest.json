@@ -1,0 +1,16 @@
+{
+  "name": "House of Memories",
+  "short_name": "Memories",
+  "description": "A private digital home for shared memories.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#FFF8F5",
+  "theme_color": "#FFF8F5",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}

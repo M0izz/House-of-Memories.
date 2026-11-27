@@ -1,0 +1,164 @@
+@import url("https://fonts.googleapis.com/css2?family=Caveat:wght@400..700&family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&family=Playfair+Display:ital,wght@0,400..900;1,400..900&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --font-playfair: 'Playfair Display', Georgia, serif;
+  --font-dmsans: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-caveat: 'Caveat', 'Comic Sans MS', cursive;
+  
+  --bg-cream: #FFF8F5;
+  --color-plum: #493C46;
+  --color-blush: #F6E4EC;
+  --color-lavender: #EDE8F7;
+  --color-sage: #E4F0E8;
+  --color-butter: #F7EBD5;
+}
+
+body {
+  background-color: var(--bg-cream);
+  color: var(--color-plum);
+  font-family: var(--font-dmsans);
+  -webkit-font-smoothing: antialiased;
+  min-height: 100vh;
+  margin: 0;
+  padding: 0;
+}
+
+h1, h2, h3, .font-serif {
+  font-family: var(--font-playfair);
+}
+
+.font-handwriting {
+  font-family: var(--font-caveat);
+}
+
+/* Scrapbook Paper Surfaces */
+.paper-surface {
+  background: #ffffff;
+  border: 1px solid rgba(73, 60, 70, 0.08);
+  box-shadow: 0 4px 20px -2px rgba(73, 60, 70, 0.05);
+}
+
+/* Washi Tape Strip */
+.washi-tape {
+  position: absolute;
+  top: -10px;
+  left: 50%;
+  transform: translateX(-50%) rotate(-1.5deg);
+  width: 90px;
+  height: 22px;
+  background: rgba(247, 235, 213, 0.85);
+  box-shadow: 0 1px 3px rgba(73, 60, 70, 0.1);
+  border-left: 2px dashed rgba(73, 60, 70, 0.15);
+  border-right: 2px dashed rgba(73, 60, 70, 0.15);
+  z-index: 10;
+  pointer-events: none;
+}
+
+.washi-tape-blush {
+  background: rgba(246, 228, 236, 0.85);
+}
+
+.washi-tape-corner {
+  position: absolute;
+  top: -8px;
+  left: -12px;
+  transform: rotate(-35deg);
+  width: 60px;
+  height: 20px;
+  background: rgba(247, 235, 213, 0.85);
+  box-shadow: 0 1px 3px rgba(73, 60, 70, 0.08);
+  z-index: 10;
+  pointer-events: none;
+}
+
+/* Polaroid Card */
+.polaroid-card {
+  background: #ffffff;
+  padding: 12px 12px 26px 12px;
+  border-radius: 6px;
+  box-shadow: 0 6px 22px -3px rgba(73, 60, 70, 0.1), 0 2px 6px rgba(73, 60, 70, 0.05);
+  border: 1px solid rgba(73, 60, 70, 0.06);
+  transition: transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 0.3s ease;
+}
+
+.polaroid-card:hover {
+  transform: translateY(-5px) rotate(-0.5deg);
+  box-shadow: 0 14px 32px -4px rgba(73, 60, 70, 0.16), 0 4px 10px rgba(73, 60, 70, 0.06);
+}
+
+/* Stacked photo album effect */
+.photo-stack {
+  position: relative;
+}
+
+.photo-stack::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: #ffffff;
+  border-radius: 12px;
+  transform: rotate(-3deg) scale(0.96);
+  box-shadow: 0 4px 14px rgba(73, 60, 70, 0.08);
+  border: 1px solid rgba(73, 60, 70, 0.06);
+  z-index: -1;
+  transition: transform 0.3s ease;
+}
+
+.photo-stack::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: #ffffff;
+  border-radius: 12px;
+  transform: rotate(2.5deg) scale(0.97);
+  box-shadow: 0 4px 14px rgba(73, 60, 70, 0.06);
+  border: 1px solid rgba(73, 60, 70, 0.06);
+  z-index: -2;
+  transition: transform 0.3s ease;
+}
+
+.photo-stack:hover::before {
+  transform: rotate(-5deg) scale(0.96);
+}
+
+.photo-stack:hover::after {
+  transform: rotate(4.5deg) scale(0.97);
+}
+
+/* Glassmorphism navigation bar */
+.glass-nav {
+  background: rgba(255, 248, 245, 0.82);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-top: 1px solid rgba(73, 60, 70, 0.08);
+}
+
+@media (min-width: 768px) {
+  .glass-nav {
+    border-top: none;
+    border-right: 1px solid rgba(73, 60, 70, 0.08);
+  }
+}
+
+/* Custom Soft Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(73, 60, 70, 0.18);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(73, 60, 70, 0.3);
+}
