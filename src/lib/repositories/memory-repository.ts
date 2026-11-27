@@ -37,13 +37,28 @@ export function isSupabaseConfigured(): boolean {
   );
 }
 
+export function isProductionEnvironment(): boolean {
+  return process.env.NODE_ENV === "production";
+}
+
+export function isLocalDevPersistenceAllowed(): boolean {
+  return !isProductionEnvironment() && !isSupabaseConfigured();
+}
+
 /**
  * Retrieves the authenticated user and their active memory space ID.
  * When running with live Supabase, enforces session validation.
  * In local dev mode without Supabase, returns mock session for seamless offline development.
+ * In production, Supabase is strictly mandatory and never falls back to local data or mock identities.
  */
 export async function getAuthContext() {
-  if (!isSupabaseConfigured()) {
+  if (isProductionEnvironment()) {
+    if (!isSupabaseConfigured()) {
+      throw new Error(
+        "Production configuration error: Authoritative Supabase persistence is required in production."
+      );
+    }
+  } else if (!isSupabaseConfigured()) {
     return {
       isAuthenticated: true,
       userId: "local-dev-user",

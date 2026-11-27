@@ -1,13 +1,21 @@
 // ============================================================================
-// House of Memories — Location Repository Layer
+// House of Memories — Hardened Location Repository Layer
 // ============================================================================
-// Supports live Supabase PostgreSQL storage with RLS enforcement and
-// graceful local persistence (.data/locations-store.json) for dev/offline mode.
+// Strict Production Persistence Rules:
+// 1. In production, Supabase is the sole authoritative persistence layer.
+// 2. Query/Connection failures throw explicit errors — NEVER silently falling back to .data.
+// 3. Local persistence is strictly isolated to development/test when Supabase is unconfigured.
+// 4. Memory linking operations are atomic — rolling back if any memory is invalid or cross-space.
 // ============================================================================
 
 import fs from "fs";
 import path from "path";
-import { isSupabaseConfigured, getAuthContext } from "./memory-repository.ts";
+import {
+  isSupabaseConfigured,
+  isProductionEnvironment,
+  isLocalDevPersistenceAllowed,
+  getAuthContext,
+} from "./memory-repository.ts";
 import { listAllMemories } from "../albums-store.ts";
 
 export interface MemoryLocationRecord {
@@ -45,14 +53,23 @@ export interface LocationLinkRecord {
 export function validateCoordinates(lat: number, lng: number): boolean {
   if (typeof lat !== "number" || typeof lng !== "number") return false;
   if (Number.isNaN(lat) || Number.isNaN(lng)) return false;
-  return lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180;
+  return lat >= -90.0 && lat <= 90.0 && lng >= -180.0 && lng <= 180.0;
 }
 
 // ----------------------------------------------------------------------------
-// Local Storage Persistence for Dev Mode
+// Local Storage Persistence (Configurable & Test-Safe)
 // ----------------------------------------------------------------------------
-const DATA_DIR = path.join(process.cwd(), ".data");
-const LOCATIONS_FILE = path.join(DATA_DIR, "locations-store.json");
+let customStoreDirectory: string | null = null;
+
+export function setLocationStoreDirectory(dir: string | null) {
+  customStoreDirectory = dir;
+  global.__homLocationStore = undefined;
+}
+
+function getStoreFilePath(): string {
+  const dir = customStoreDirectory || path.join(process.cwd(), ".data");
+  return path.join(dir, "locations-store.json");
+}
 
 interface LocalLocationStore {
   locations: MemoryLocationRecord[];
@@ -69,18 +86,18 @@ function loadLocalStore(): LocalLocationStore {
     return global.__homLocationStore;
   }
 
+  const filePath = getStoreFilePath();
   try {
-    if (typeof window === "undefined" && fs.existsSync(LOCATIONS_FILE)) {
-      const raw = fs.readFileSync(LOCATIONS_FILE, "utf-8");
+    if (typeof window === "undefined" && fs.existsSync(filePath)) {
+      const raw = fs.readFileSync(filePath, "utf-8");
       const parsed = JSON.parse(raw);
       global.__homLocationStore = parsed;
       return parsed;
     }
   } catch (err) {
-    console.error("Failed to load local locations store:", err);
+    console.error("Failed to load local locations store from disk:", err);
   }
 
-  // Initial production state: empty (no fabricated data)
   const emptyStore: LocalLocationStore = {
     locations: [],
     links: [],
@@ -92,13 +109,15 @@ function loadLocalStore(): LocalLocationStore {
 function saveLocalStore(store: LocalLocationStore) {
   try {
     if (typeof window === "undefined") {
-      if (!fs.existsSync(DATA_DIR)) {
-        fs.mkdirSync(DATA_DIR, { recursive: true });
+      const filePath = getStoreFilePath();
+      const parentDir = path.dirname(filePath);
+      if (!fs.existsSync(parentDir)) {
+        fs.mkdirSync(parentDir, { recursive: true });
       }
-      fs.writeFileSync(LOCATIONS_FILE, JSON.stringify(store, null, 2), "utf-8");
+      fs.writeFileSync(filePath, JSON.stringify(store, null, 2), "utf-8");
     }
   } catch (err) {
-    console.error("Failed to save local locations store:", err);
+    console.error("Failed to save local locations store to disk:", err);
   }
 }
 
@@ -108,7 +127,7 @@ async function getSupabaseServerClient(): Promise<any> {
 }
 
 // ----------------------------------------------------------------------------
-// Public Location Repository Methods
+// Public Hardened Repository Methods
 // ----------------------------------------------------------------------------
 
 export async function fetchLocations(options?: {
@@ -117,98 +136,112 @@ export async function fetchLocations(options?: {
 }): Promise<{
   locations: MemoryLocationRecord[];
   isDemoMode: boolean;
+  unassignedSpace?: boolean;
 }> {
   const auth = await getAuthContext();
 
-  // If live Supabase is configured and user is authenticated in a space
-  if (!auth.isDemoMode && auth.spaceId) {
-    try {
-      const supabase: any = await getSupabaseServerClient();
-      let query = supabase
-        .from("memory_locations")
-        .select(`
-          id,
-          space_id,
-          name,
-          address,
-          city,
-          region,
-          country,
-          latitude,
-          longitude,
-          description,
-          created_by,
-          created_at,
-          updated_at,
-          memory_location_links (
-            memory_id,
-            memories:memory_id (
-              id,
-              title,
-              caption,
-              captured_at,
-              created_at,
-              memory_media (
-                storage_path
-              )
+  // If in production or live Supabase is configured
+  if (!auth.isDemoMode) {
+    if (!auth.isAuthenticated) {
+      throw new Error("Authentication required: Please sign in to view memory locations.");
+    }
+
+    if (!auth.spaceId) {
+      // User is authenticated but not yet a member of any memory space
+      return { locations: [], isDemoMode: false, unassignedSpace: true };
+    }
+
+    const supabase: any = await getSupabaseServerClient();
+    let query = supabase
+      .from("memory_locations")
+      .select(`
+        id,
+        space_id,
+        name,
+        address,
+        city,
+        region,
+        country,
+        latitude,
+        longitude,
+        description,
+        created_by,
+        created_at,
+        updated_at,
+        memory_location_links (
+          memory_id,
+          memories:memory_id (
+            id,
+            title,
+            caption,
+            captured_at,
+            created_at,
+            memory_media (
+              storage_path
             )
           )
-        `)
-        .eq("space_id", auth.spaceId)
-        .order("created_at", { ascending: false });
+        )
+      `)
+      .eq("space_id", auth.spaceId)
+      .order("created_at", { ascending: false });
 
-      if (options?.search) {
-        query = query.ilike("name", `%${options.search}%`);
-      }
-
-      const { data, error } = await query;
-      if (error) throw error;
-
-      const locations: MemoryLocationRecord[] = (data || []).map((row: any) => {
-        const linkedMemories = (row.memory_location_links || [])
-          .filter((link: any) => link.memories)
-          .map((link: any) => {
-            const m = link.memories;
-            return {
-              id: m.id,
-              title: m.title || "Untitled Memory",
-              caption: m.caption || "",
-              date: m.captured_at
-                ? new Date(m.captured_at).toLocaleDateString("en-US", { month: "short", year: "numeric" })
-                : new Date(m.created_at).toLocaleDateString("en-US", { month: "short", year: "numeric" }),
-              imageUrl: m.memory_media?.[0]?.storage_path || "/placeholder.jpg",
-            };
-          });
-
-        return {
-          id: row.id,
-          spaceId: row.space_id,
-          name: row.name,
-          address: row.address,
-          city: row.city,
-          region: row.region,
-          country: row.country,
-          latitude: Number(row.latitude),
-          longitude: Number(row.longitude),
-          description: row.description,
-          createdBy: row.created_by,
-          createdAt: row.created_at,
-          updatedAt: row.updated_at,
-          memoryCount: linkedMemories.length,
-          coverImageUrl: linkedMemories[0]?.imageUrl || null,
-          memories: linkedMemories,
-        };
-      });
-
-      return { locations, isDemoMode: false };
-    } catch (err) {
-      console.error("Supabase fetchLocations error, falling back to local:", err);
+    if (options?.search) {
+      query = query.ilike("name", `%${options.search}%`);
     }
+
+    const { data, error } = await query;
+    if (error) {
+      // NON-NEGOTIABLE: In production, fail closed! Never fall back to .data
+      throw new Error(`Database query failed while fetching locations: ${error.message}`);
+    }
+
+    const locations: MemoryLocationRecord[] = (data || []).map((row: any) => {
+      const linkedMemories = (row.memory_location_links || [])
+        .filter((link: any) => link.memories)
+        .map((link: any) => {
+          const m = link.memories;
+          return {
+            id: m.id,
+            title: m.title || "Untitled Memory",
+            caption: m.caption || "",
+            date: m.captured_at
+              ? new Date(m.captured_at).toLocaleDateString("en-US", { month: "short", year: "numeric" })
+              : new Date(m.created_at).toLocaleDateString("en-US", { month: "short", year: "numeric" }),
+            imageUrl: m.memory_media?.[0]?.storage_path || "/placeholder.jpg",
+          };
+        });
+
+      return {
+        id: row.id,
+        spaceId: row.space_id,
+        name: row.name,
+        address: row.address,
+        city: row.city,
+        region: row.region,
+        country: row.country,
+        latitude: Number(row.latitude),
+        longitude: Number(row.longitude),
+        description: row.description,
+        createdBy: row.created_by,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+        memoryCount: linkedMemories.length,
+        coverImageUrl: linkedMemories[0]?.imageUrl || null,
+        memories: linkedMemories,
+      };
+    });
+
+    return { locations, isDemoMode: false };
   }
 
-  // Dev/local fallback
+  // Explicit Local Dev Mode Only
+  if (!isLocalDevPersistenceAllowed()) {
+    throw new Error("Local persistence is strictly prohibited in production.");
+  }
+
   const store = loadLocalStore();
-  let locs = [...store.locations];
+  const currentSpaceId = auth.spaceId || "space-hom-main";
+  let locs = store.locations.filter((l) => !l.spaceId || l.spaceId === currentSpaceId);
 
   if (options?.search) {
     const q = options.search.toLowerCase();
@@ -220,7 +253,6 @@ export async function fetchLocations(options?: {
     );
   }
 
-  // Populate linked memories from albums-store
   const allMemories = listAllMemories();
   const memoriesMap = new Map(allMemories.map((m) => [m.id, m]));
 
@@ -249,8 +281,88 @@ export async function fetchLocations(options?: {
 }
 
 export async function fetchLocationById(id: string): Promise<MemoryLocationRecord | null> {
-  const result = await fetchLocations();
-  return result.locations.find((l) => l.id === id) || null;
+  const auth = await getAuthContext();
+
+  if (!auth.isDemoMode) {
+    if (!auth.isAuthenticated || !auth.spaceId) {
+      return null;
+    }
+
+    const supabase: any = await getSupabaseServerClient();
+    const { data: row, error } = await supabase
+      .from("memory_locations")
+      .select(`
+        id,
+        space_id,
+        name,
+        address,
+        city,
+        region,
+        country,
+        latitude,
+        longitude,
+        description,
+        created_by,
+        created_at,
+        updated_at,
+        memory_location_links (
+          memory_id,
+          memories:memory_id (
+            id,
+            title,
+            caption,
+            captured_at,
+            created_at,
+            memory_media (
+              storage_path
+            )
+          )
+        )
+      `)
+      .eq("id", id)
+      .eq("space_id", auth.spaceId)
+      .single();
+
+    if (error || !row) return null;
+
+    const linkedMemories = (row.memory_location_links || [])
+      .filter((link: any) => link.memories)
+      .map((link: any) => {
+        const m = link.memories;
+        return {
+          id: m.id,
+          title: m.title || "Untitled Memory",
+          caption: m.caption || "",
+          date: m.captured_at
+            ? new Date(m.captured_at).toLocaleDateString("en-US", { month: "short", year: "numeric" })
+            : new Date(m.created_at).toLocaleDateString("en-US", { month: "short", year: "numeric" }),
+          imageUrl: m.memory_media?.[0]?.storage_path || "/placeholder.jpg",
+        };
+      });
+
+    return {
+      id: row.id,
+      spaceId: row.space_id,
+      name: row.name,
+      address: row.address,
+      city: row.city,
+      region: row.region,
+      country: row.country,
+      latitude: Number(row.latitude),
+      longitude: Number(row.longitude),
+      description: row.description,
+      createdBy: row.created_by,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      memoryCount: linkedMemories.length,
+      coverImageUrl: linkedMemories[0]?.imageUrl || null,
+      memories: linkedMemories,
+    };
+  }
+
+  // Dev fallback
+  const res = await fetchLocations();
+  return res.locations.find((l) => l.id === id) || null;
 }
 
 export async function createLocationRecord(input: {
@@ -273,36 +385,115 @@ export async function createLocationRecord(input: {
   }
 
   if (!validateCoordinates(input.latitude, input.longitude)) {
-    throw new Error("Invalid geographic coordinates. Latitude must be between -90 and 90, longitude between -180 and 180.");
+    throw new Error(
+      "Invalid geographic coordinates. Latitude must be between -90 and 90, longitude between -180 and 180."
+    );
   }
 
   const auth = await getAuthContext();
 
-  if (!auth.isDemoMode && auth.spaceId) {
+  if (!auth.isDemoMode) {
+    if (!auth.isAuthenticated) {
+      throw new Error("Authentication required: Please sign in to create locations.");
+    }
+    if (!auth.spaceId) {
+      throw new Error("Unauthorized: User does not belong to an active memory space.");
+    }
+
     const supabase: any = await getSupabaseServerClient();
 
-    const insertPayload = {
-      space_id: auth.spaceId,
-      name: input.name.trim(),
-      latitude: input.latitude,
-      longitude: input.longitude,
-      address: input.address?.trim() || null,
-      city: input.city?.trim() || null,
-      region: input.region?.trim() || null,
-      country: input.country?.trim() || null,
-      description: input.description?.trim() || null,
-      created_by: auth.userId || null,
-    };
+    // Use Atomic PostgreSQL Stored Procedure if available
+    try {
+      const { data: rpcResult, error: rpcError } = await supabase.rpc(
+        "create_location_atomic",
+        {
+          p_space_id: auth.spaceId,
+          p_name: input.name.trim(),
+          p_latitude: input.latitude,
+          p_longitude: input.longitude,
+          p_address: input.address?.trim() || null,
+          p_city: input.city?.trim() || null,
+          p_region: input.region?.trim() || null,
+          p_country: input.country?.trim() || null,
+          p_description: input.description?.trim() || null,
+          p_memory_ids: input.memoryIds || null,
+        }
+      );
 
+      if (!rpcError && rpcResult) {
+        return {
+          location: {
+            id: rpcResult.id,
+            spaceId: rpcResult.spaceId,
+            name: rpcResult.name,
+            latitude: Number(rpcResult.latitude),
+            longitude: Number(rpcResult.longitude),
+            address: rpcResult.address,
+            city: rpcResult.city,
+            region: rpcResult.region,
+            country: rpcResult.country,
+            description: rpcResult.description,
+            createdBy: rpcResult.createdBy,
+            createdAt: rpcResult.createdAt,
+            updatedAt: rpcResult.updatedAt,
+            memoryCount: rpcResult.memoryCount || 0,
+          },
+          isDemoMode: false,
+        };
+      }
+
+      if (rpcError && !rpcError.message?.includes("function create_location_atomic") && !rpcError.message?.includes("does not exist")) {
+        // Real validation or integrity error from the database trigger/function: throw immediately
+        throw new Error(rpcError.message);
+      }
+    } catch (rpcErr: any) {
+      if (rpcErr.message && !rpcErr.message.includes("does not exist")) {
+        throw rpcErr;
+      }
+    }
+
+    // Atomic application-level fallback for environments without RPC migration applied
+    // 1. Verify that all requested memories exist and belong to auth.spaceId
+    if (input.memoryIds && input.memoryIds.length > 0) {
+      const { data: validMemories, error: memError } = await supabase
+        .from("memories")
+        .select("id")
+        .in("id", input.memoryIds)
+        .eq("space_id", auth.spaceId)
+        .is("deleted_at", null);
+
+      if (memError) {
+        throw new Error(`Failed to validate memory links: ${memError.message}`);
+      }
+
+      if ((validMemories || []).length !== input.memoryIds.length) {
+        throw new Error("Atomic rollback: One or more requested memories do not exist or belong to a different memory space.");
+      }
+    }
+
+    // 2. Insert location record
     const { data: newLoc, error: locError } = await supabase
       .from("memory_locations")
-      .insert(insertPayload)
+      .insert({
+        space_id: auth.spaceId,
+        name: input.name.trim(),
+        latitude: input.latitude,
+        longitude: input.longitude,
+        address: input.address?.trim() || null,
+        city: input.city?.trim() || null,
+        region: input.region?.trim() || null,
+        country: input.country?.trim() || null,
+        description: input.description?.trim() || null,
+        created_by: auth.userId,
+      })
       .select()
       .single();
 
-    if (locError) throw locError;
+    if (locError) {
+      throw new Error(`Database error creating location: ${locError.message}`);
+    }
 
-    // Link memories if provided
+    // 3. Insert memory links
     if (input.memoryIds && input.memoryIds.length > 0) {
       const linkPayloads = input.memoryIds.map((memId) => ({
         location_id: newLoc.id,
@@ -314,33 +505,36 @@ export async function createLocationRecord(input: {
         .insert(linkPayloads);
 
       if (linkError) {
-        console.error("Failed to link memories to location:", linkError);
+        // Clean up orphaned location to preserve atomicity
+        await supabase.from("memory_locations").delete().eq("id", newLoc.id);
+        throw new Error(`Atomic rollback: Failed to link memories to location: ${linkError.message}`);
       }
     }
 
     const created = await fetchLocationById(newLoc.id);
-    return {
-      location: created || {
-        id: newLoc.id,
-        spaceId: newLoc.space_id,
-        name: newLoc.name,
-        latitude: Number(newLoc.latitude),
-        longitude: Number(newLoc.longitude),
-        address: newLoc.address,
-        city: newLoc.city,
-        region: newLoc.region,
-        country: newLoc.country,
-        description: newLoc.description,
-        createdBy: newLoc.created_by,
-        createdAt: newLoc.created_at,
-        updatedAt: newLoc.updated_at,
-        memoryCount: input.memoryIds?.length || 0,
-      },
-      isDemoMode: false,
-    };
+    if (!created) {
+      throw new Error("Failed to retrieve created location record from database.");
+    }
+    return { location: created, isDemoMode: false };
   }
 
-  // Dev/local fallback
+  // Local Dev Storage (Enforcing Atomic Link Validation)
+  if (!isLocalDevPersistenceAllowed()) {
+    throw new Error("Local persistence is strictly prohibited in production.");
+  }
+
+  const allMemories = listAllMemories();
+  const validMemoryIds = new Set(allMemories.map((m) => m.id));
+
+  // Atomic link validation: every memory must exist
+  if (input.memoryIds && input.memoryIds.length > 0) {
+    for (const memId of input.memoryIds) {
+      if (!validMemoryIds.has(memId)) {
+        throw new Error(`Atomic rollback: Memory ID ${memId} not found in current memory space.`);
+      }
+    }
+  }
+
   const store = loadLocalStore();
   const now = new Date().toISOString();
   const newId = `loc-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
@@ -376,8 +570,6 @@ export async function createLocationRecord(input: {
   }
 
   saveLocalStore(store);
-
-  // Return enriched record
   const result = await fetchLocationById(newId);
   return { location: result || newRecord, isDemoMode: true };
 }
@@ -407,8 +599,88 @@ export async function updateLocationRecord(
 
   const auth = await getAuthContext();
 
-  if (!auth.isDemoMode && auth.spaceId) {
+  if (!auth.isDemoMode) {
+    if (!auth.isAuthenticated || !auth.spaceId) {
+      throw new Error("Unauthorized: Caller is not a member of this memory space.");
+    }
+
     const supabase: any = await getSupabaseServerClient();
+
+    // Verify existing location belongs to caller's space
+    const { data: existing, error: existError } = await supabase
+      .from("memory_locations")
+      .select("id, space_id")
+      .eq("id", id)
+      .eq("space_id", auth.spaceId)
+      .single();
+
+    if (existError || !existing) {
+      throw new Error("Location not found or access denied.");
+    }
+
+    // Try Atomic RPC
+    try {
+      const { data: rpcResult, error: rpcError } = await supabase.rpc(
+        "update_location_atomic",
+        {
+          p_location_id: id,
+          p_name: input.name?.trim() || null,
+          p_latitude: input.latitude ?? null,
+          p_longitude: input.longitude ?? null,
+          p_address: input.address !== undefined ? input.address : null,
+          p_city: input.city !== undefined ? input.city : null,
+          p_region: input.region !== undefined ? input.region : null,
+          p_country: input.country !== undefined ? input.country : null,
+          p_description: input.description !== undefined ? input.description : null,
+          p_memory_ids: input.memoryIds || null,
+          p_sync_memories: input.memoryIds !== undefined,
+        }
+      );
+
+      if (!rpcError && rpcResult) {
+        return {
+          location: {
+            id: rpcResult.id,
+            spaceId: rpcResult.spaceId,
+            name: rpcResult.name,
+            latitude: Number(rpcResult.latitude),
+            longitude: Number(rpcResult.longitude),
+            address: rpcResult.address,
+            city: rpcResult.city,
+            region: rpcResult.region,
+            country: rpcResult.country,
+            description: rpcResult.description,
+            createdBy: rpcResult.createdBy,
+            createdAt: rpcResult.createdAt,
+            updatedAt: rpcResult.updatedAt,
+            memoryCount: rpcResult.memoryCount || 0,
+          },
+          isDemoMode: false,
+        };
+      }
+
+      if (rpcError && !rpcError.message?.includes("does not exist")) {
+        throw new Error(rpcError.message);
+      }
+    } catch (rpcErr: any) {
+      if (rpcErr.message && !rpcErr.message.includes("does not exist")) {
+        throw rpcErr;
+      }
+    }
+
+    // Fallback atomic updates
+    if (input.memoryIds !== undefined && input.memoryIds.length > 0) {
+      const { data: validMemories, error: memError } = await supabase
+        .from("memories")
+        .select("id")
+        .in("id", input.memoryIds)
+        .eq("space_id", auth.spaceId)
+        .is("deleted_at", null);
+
+      if (memError || (validMemories || []).length !== input.memoryIds.length) {
+        throw new Error("Atomic rollback: One or more requested memories do not belong to your memory space.");
+      }
+    }
 
     const updatePayload: any = {
       updated_at: new Date().toISOString(),
@@ -430,13 +702,8 @@ export async function updateLocationRecord(
 
     if (updateError) throw updateError;
 
-    // Synchronize memory links if provided
     if (input.memoryIds !== undefined) {
-      await supabase
-        .from("memory_location_links")
-        .delete()
-        .eq("location_id", id);
-
+      await supabase.from("memory_location_links").delete().eq("location_id", id);
       if (input.memoryIds.length > 0) {
         const links = input.memoryIds.map((mId) => ({
           location_id: id,
@@ -451,10 +718,20 @@ export async function updateLocationRecord(
     return { location: updated, isDemoMode: false };
   }
 
-  // Dev/local fallback
+  // Local Dev Storage
   const store = loadLocalStore();
   const idx = store.locations.findIndex((l) => l.id === id);
   if (idx === -1) throw new Error("Location not found.");
+
+  if (input.memoryIds !== undefined && input.memoryIds.length > 0) {
+    const allMemories = listAllMemories();
+    const validMemoryIds = new Set(allMemories.map((m) => m.id));
+    for (const memId of input.memoryIds) {
+      if (!validMemoryIds.has(memId)) {
+        throw new Error(`Atomic rollback: Memory ${memId} not found.`);
+      }
+    }
+  }
 
   const existing = store.locations[idx];
   const updated: MemoryLocationRecord = {
@@ -496,23 +773,47 @@ export async function deleteLocationRecord(id: string): Promise<{
 }> {
   const auth = await getAuthContext();
 
-  if (!auth.isDemoMode && auth.spaceId) {
+  if (!auth.isDemoMode) {
+    if (!auth.isAuthenticated || !auth.spaceId) {
+      throw new Error("Unauthorized: Access denied.");
+    }
+
     const supabase: any = await getSupabaseServerClient();
-    // Deleting the location record cascade-deletes memory_location_links,
-    // leaving all memories completely untouched.
-    const { error } = await supabase
+    // Verify location exists in caller's space
+    const { data: existing, error: existError } = await supabase
+      .from("memory_locations")
+      .select("id")
+      .eq("id", id)
+      .eq("space_id", auth.spaceId)
+      .single();
+
+    if (existError || !existing) {
+      throw new Error("Location not found or access denied.");
+    }
+
+    // Cascade delete: removes location and memory_location_links;
+    // memories themselves are never touched!
+    const { error: delError } = await supabase
       .from("memory_locations")
       .delete()
       .eq("id", id)
       .eq("space_id", auth.spaceId);
 
-    if (error) throw error;
+    if (delError) {
+      throw new Error(`Failed to delete location: ${delError.message}`);
+    }
+
     return { success: true, isDemoMode: false };
   }
 
-  // Dev/local fallback
+  // Local Dev Storage
   const store = loadLocalStore();
-  store.locations = store.locations.filter((l) => l.id !== id);
+  const locIndex = store.locations.findIndex((l) => l.id === id);
+  if (locIndex === -1) {
+    throw new Error("Location not found.");
+  }
+
+  store.locations.splice(locIndex, 1);
   store.links = store.links.filter((l) => l.locationId !== id);
   saveLocalStore(store);
 

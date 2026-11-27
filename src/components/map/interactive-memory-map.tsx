@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useRef, useState, useCallback } from "react";
+import React, { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import {
@@ -15,17 +15,15 @@ import {
   X,
   Compass,
   Trash2,
-  Edit2,
-  ExternalLink,
-  Check,
+  AlertTriangle,
   Loader2,
+  Check,
   AlertCircle,
   Image as ImageIcon,
 } from "lucide-react";
 import type { MemoryLocationRecord } from "@/lib/repositories/location-repository";
 import type { GeocodeResult } from "@/app/api/locations/geocode/route";
 
-// Carto Voyager warm pastel tile style
 const MAP_STYLE: maplibregl.StyleSpecification = {
   version: 8,
   sources: {
@@ -50,7 +48,6 @@ const MAP_STYLE: maplibregl.StyleSpecification = {
   ],
 };
 
-// Explicit dev/demo sample locations isolated for preview mode only
 const SAMPLE_DEMO_PLACES: MemoryLocationRecord[] = [
   {
     id: "sample-1",
@@ -65,15 +62,6 @@ const SAMPLE_DEMO_PLACES: MemoryLocationRecord[] = [
     memoryCount: 8,
     createdAt: "2024-04-12T10:00:00Z",
     updatedAt: "2024-04-12T10:00:00Z",
-    memories: [
-      {
-        id: "demo-m1",
-        title: "Morning Croissant",
-        caption: "Warm flaky pastry and street accordion music.",
-        date: "Apr 2024",
-        imageUrl: "https://images.unsplash.com/photo-1502602898657-3e91760cbb34?auto=format&fit=crop&w=600&q=80",
-      },
-    ],
   },
   {
     id: "sample-2",
@@ -105,9 +93,6 @@ const SAMPLE_DEMO_PLACES: MemoryLocationRecord[] = [
   },
 ];
 
-/**
- * Strict image URL sanitizer to prevent protocol abuse (e.g. javascript:)
- */
 function sanitizeImageUrl(url?: string | null): string | null {
   if (!url) return null;
   const trimmed = url.trim();
@@ -121,9 +106,6 @@ function sanitizeImageUrl(url?: string | null): string | null {
   return null;
 }
 
-/**
- * Tests WebGL hardware acceleration availability
- */
 function isWebGLSupported(): boolean {
   if (typeof window === "undefined") return false;
   try {
@@ -145,7 +127,6 @@ export default function InteractiveMemoryMap() {
   const activePopupRef = useRef<maplibregl.Popup | null>(null);
   const previewMarkerRef = useRef<maplibregl.Marker | null>(null);
 
-  // Mutable refs for event listeners (prevents stale closures)
   const isAddingPinRef = useRef<boolean>(false);
   const onMapClickRef = useRef<(coords: [number, number]) => void>(() => {});
 
@@ -157,8 +138,9 @@ export default function InteractiveMemoryMap() {
   const [searchQuery, setSearchQuery] = useState("");
   const [isDemoMode, setIsDemoMode] = useState(false);
   const [webGlAvailable, setWebGlAvailable] = useState(true);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // Pin creation / editing state
+  // Pin creation state
   const [isAddingPin, setIsAddingPin] = useState(false);
   const [newPinCoords, setNewPinCoords] = useState<[number, number] | null>(null);
   const [newPlaceName, setNewPlaceName] = useState("");
@@ -169,25 +151,46 @@ export default function InteractiveMemoryMap() {
   const [selectedMemoryIds, setSelectedMemoryIds] = useState<string[]>([]);
   const [isSavingPin, setIsSavingPin] = useState(false);
 
-  // Available memories for linking
+  // Available memories
   const [availableMemories, setAvailableMemories] = useState<
     { id: string; title: string; date: string; imageUrl?: string }[]
   >([]);
 
-  // Geocoding search state
+  // Geocoding state
   const [geocodeQuery, setGeocodeQuery] = useState("");
   const [geocodeResults, setGeocodeResults] = useState<GeocodeResult[]>([]);
   const [isSearchingGeocode, setIsSearchingGeocode] = useState(false);
   const [showGeocodeDropdown, setShowGeocodeDropdown] = useState(false);
+  const [geocodeError, setGeocodeError] = useState<string | null>(null);
 
-  // Update ref
   useEffect(() => {
     isAddingPinRef.current = isAddingPin;
   }, [isAddingPin]);
 
-  // Load locations from database API
+  // Check duplicate location
+  const duplicateWarning = useMemo(() => {
+    if (!newPlaceName.trim() && !newPinCoords) return null;
+    const normName = newPlaceName.trim().toLowerCase();
+
+    for (const loc of locations) {
+      if (normName && loc.name.toLowerCase() === normName) {
+        return `A footprint named "${loc.name}" already exists in your memory space.`;
+      }
+      if (newPinCoords) {
+        const dLat = Math.abs(loc.latitude - newPinCoords[1]);
+        const dLng = Math.abs(loc.longitude - newPinCoords[0]);
+        if (dLat < 0.0015 && dLng < 0.0015) {
+          return `You already have a pinned landmark ("${loc.name}") right near this exact spot.`;
+        }
+      }
+    }
+    return null;
+  }, [newPlaceName, newPinCoords, locations]);
+
+  // Load locations
   const loadLocations = useCallback(async (previewDemo = false) => {
     setIsLoading(true);
+    setErrorMessage(null);
     try {
       if (previewDemo) {
         setLocations(SAMPLE_DEMO_PLACES);
@@ -199,9 +202,11 @@ export default function InteractiveMemoryMap() {
       }
 
       const res = await fetch("/api/locations");
-      if (!res.ok) throw new Error("Failed to load locations");
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || "Failed to load locations from database.");
+      }
       const data = await res.json();
-
       const loaded = data.locations || [];
       setLocations(loaded);
       setIsDemoMode(Boolean(data.isDemoMode));
@@ -211,15 +216,15 @@ export default function InteractiveMemoryMap() {
       } else {
         setSelectedLocationId(null);
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error("Failed to load locations:", err);
+      setErrorMessage(err.message || "Failed to load footprints.");
       setLocations([]);
     } finally {
       setIsLoading(false);
     }
   }, []);
 
-  // Fetch available memories for association
   const loadAvailableMemories = useCallback(async () => {
     try {
       const res = await fetch("/api/memories/available");
@@ -237,7 +242,7 @@ export default function InteractiveMemoryMap() {
     loadAvailableMemories();
   }, [loadLocations, loadAvailableMemories]);
 
-  // Safe DOM-based popup generation eliminating .setHTML() injection vulnerabilities
+  // Safe DOM popup
   const showSecurePopup = useCallback((place: MemoryLocationRecord) => {
     if (!mapInstance.current) return;
 
@@ -250,7 +255,6 @@ export default function InteractiveMemoryMap() {
     container.className = "hom-memory-popup-inner p-2 max-w-[250px]";
     container.style.fontFamily = "var(--font-dmsans, sans-serif)";
 
-    // Sanitize image URL
     const safeCover = sanitizeImageUrl(place.coverImageUrl);
     if (safeCover) {
       const imgWrapper = document.createElement("div");
@@ -263,7 +267,6 @@ export default function InteractiveMemoryMap() {
       container.appendChild(imgWrapper);
     }
 
-    // Place location label
     const locWrapper = document.createElement("div");
     locWrapper.className = "flex items-center gap-1.5 mb-1";
     const dot = document.createElement("span");
@@ -277,13 +280,11 @@ export default function InteractiveMemoryMap() {
     locWrapper.appendChild(locLabel);
     container.appendChild(locWrapper);
 
-    // Place title
     const title = document.createElement("h4");
     title.className = "font-serif text-sm font-bold text-plum leading-snug mb-1";
     title.textContent = place.name;
     container.appendChild(title);
 
-    // Place description
     if (place.description) {
       const desc = document.createElement("p");
       desc.className = "text-[11px] text-plum/75 leading-relaxed mb-2 line-clamp-3";
@@ -291,7 +292,6 @@ export default function InteractiveMemoryMap() {
       container.appendChild(desc);
     }
 
-    // Footer with count and action button
     const footer = document.createElement("div");
     footer.className = "flex items-center justify-between pt-2 border-t border-plum/10 text-xs";
 
@@ -303,6 +303,7 @@ export default function InteractiveMemoryMap() {
     const viewBtn = document.createElement("button");
     viewBtn.className = "px-2 py-1 rounded-lg bg-plum text-white text-[11px] font-medium hover:bg-plum/90 transition-all";
     viewBtn.textContent = "View Moments";
+    viewBtn.setAttribute("aria-label", `View memories for ${place.name}`);
     viewBtn.addEventListener("click", () => {
       setActiveDrawerLocation(place);
     });
@@ -323,14 +324,12 @@ export default function InteractiveMemoryMap() {
     activePopupRef.current = popup;
   }, []);
 
-  // Update map click handler ref
   onMapClickRef.current = (coords: [number, number]) => {
     if (!isAddingPinRef.current) return;
     setNewPinCoords(coords);
 
     if (mapInstance.current) {
       if (!previewMarkerRef.current) {
-        // Create custom draggable preview marker
         const el = document.createElement("div");
         el.className = "hom-preview-marker";
         el.innerHTML = `
@@ -346,7 +345,6 @@ export default function InteractiveMemoryMap() {
             align-items: center;
             justify-content: center;
             cursor: grab;
-            animation: bounce 1s infinite alternate;
           ">
             <svg style="transform: rotate(45deg); width: 16px; height: 16px; color: #FFF8F5;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4" />
@@ -370,7 +368,7 @@ export default function InteractiveMemoryMap() {
     }
   };
 
-  // Initialize MapLibre GL once
+  // Map Initialization
   useEffect(() => {
     if (!mapContainer.current || mapInstance.current) return;
 
@@ -410,7 +408,6 @@ export default function InteractiveMemoryMap() {
         onMapClickRef.current([e.lngLat.lng, e.lngLat.lat]);
       });
 
-      // Resize observer to ensure responsive map layout
       const resizeObserver = new ResizeObserver(() => {
         map.resize();
       });
@@ -433,12 +430,11 @@ export default function InteractiveMemoryMap() {
     }
   }, []);
 
-  // Sync Markers when locations change (without reinitializing the map canvas)
+  // Sync Markers
   useEffect(() => {
     const map = mapInstance.current;
     if (!map) return;
 
-    // Clear existing location markers
     markersRef.current.forEach((marker) => marker.remove());
     markersRef.current.clear();
 
@@ -511,8 +507,15 @@ export default function InteractiveMemoryMap() {
     });
   }, [locations, selectedLocationId, showSecurePopup]);
 
-  // Clean up preview pin when exiting pin mode
+  // Unsaved changes warning
   const handleCancelPinMode = () => {
+    if (newPlaceName.trim() || newPinCoords || selectedMemoryIds.length > 0) {
+      const confirmDiscard = window.confirm(
+        "You have unsaved location pin details. Are you sure you want to discard them?"
+      );
+      if (!confirmDiscard) return;
+    }
+
     setIsAddingPin(false);
     setNewPinCoords(null);
     setNewPlaceName("");
@@ -524,6 +527,7 @@ export default function InteractiveMemoryMap() {
     setGeocodeQuery("");
     setGeocodeResults([]);
     setShowGeocodeDropdown(false);
+    setGeocodeError(null);
 
     if (previewMarkerRef.current) {
       previewMarkerRef.current.remove();
@@ -531,7 +535,6 @@ export default function InteractiveMemoryMap() {
     }
   };
 
-  // Select place from list
   const handleSelectLocation = (place: MemoryLocationRecord) => {
     setSelectedLocationId(place.id);
     if (mapInstance.current) {
@@ -546,7 +549,6 @@ export default function InteractiveMemoryMap() {
     }
   };
 
-  // Fit bounds to all places
   const fitAllPlaces = () => {
     if (!mapInstance.current || locations.length === 0) return;
     const bounds = new maplibregl.LngLatBounds();
@@ -554,9 +556,10 @@ export default function InteractiveMemoryMap() {
     mapInstance.current.fitBounds(bounds, { padding: 60, maxZoom: 14, speed: 1.2 });
   };
 
-  // Perform geocode search
+  // Geocode with loading state & rate-limit handling
   const handleGeocodeSearch = async (val: string) => {
     setGeocodeQuery(val);
+    setGeocodeError(null);
     if (val.trim().length < 2) {
       setGeocodeResults([]);
       setShowGeocodeDropdown(false);
@@ -565,20 +568,32 @@ export default function InteractiveMemoryMap() {
 
     setIsSearchingGeocode(true);
     try {
-      const res = await fetch(`/api/locations/geocode?q=${encodeURIComponent(val)}`);
-      if (res.ok) {
-        const data = await res.json();
-        setGeocodeResults(data.results || []);
-        setShowGeocodeDropdown(true);
+      const res = await fetch(`/api/locations/geocode?q=${encodeURIComponent(val.slice(0, 100))}`);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        if (res.status === 429) {
+          setGeocodeError("Rate limit reached. Please wait a moment before searching again.");
+        } else {
+          setGeocodeError(err.error || "Geocoding service unavailable.");
+        }
+        setShowGeocodeDropdown(false);
+        return;
+      }
+
+      const data = await res.json();
+      const results = data.results || [];
+      setGeocodeResults(results);
+      setShowGeocodeDropdown(true);
+      if (results.length === 0) {
+        setGeocodeError(`No places found matching "${val}". You can click the map to place the pin manually.`);
       }
     } catch (err) {
-      console.error("Geocoding failed:", err);
+      setGeocodeError("Network error contacting geocoding service.");
     } finally {
       setIsSearchingGeocode(false);
     }
   };
 
-  // Choose geocoded result
   const handleSelectGeocodeResult = (item: GeocodeResult) => {
     setNewPinCoords([item.longitude, item.latitude]);
     setNewPlaceName(item.name || item.displayName.split(",")[0]);
@@ -586,6 +601,7 @@ export default function InteractiveMemoryMap() {
     if (item.city) setNewPlaceCity(item.city);
     if (item.country) setNewPlaceCountry(item.country);
     setShowGeocodeDropdown(false);
+    setGeocodeError(null);
 
     if (mapInstance.current) {
       mapInstance.current.flyTo({
@@ -602,7 +618,7 @@ export default function InteractiveMemoryMap() {
     }
   };
 
-  // Save new pin
+  // Atomic Pin Save
   const handleSavePin = async () => {
     if (!newPinCoords || !newPlaceName.trim()) return;
 
@@ -624,8 +640,8 @@ export default function InteractiveMemoryMap() {
       });
 
       if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || "Failed to save location");
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || "Failed to save location footprint.");
       }
 
       const data = await res.json();
@@ -633,7 +649,23 @@ export default function InteractiveMemoryMap() {
 
       setLocations((prev) => [savedLoc, ...prev]);
       setSelectedLocationId(savedLoc.id);
-      handleCancelPinMode();
+
+      // Clean up creation state without discard confirmation
+      setIsAddingPin(false);
+      setNewPinCoords(null);
+      setNewPlaceName("");
+      setNewPlaceAddress("");
+      setNewPlaceCity("");
+      setNewPlaceCountry("");
+      setNewPlaceDesc("");
+      setSelectedMemoryIds([]);
+      setGeocodeQuery("");
+      setGeocodeResults([]);
+      setShowGeocodeDropdown(false);
+      if (previewMarkerRef.current) {
+        previewMarkerRef.current.remove();
+        previewMarkerRef.current = null;
+      }
 
       if (mapInstance.current) {
         mapInstance.current.flyTo({
@@ -644,36 +676,34 @@ export default function InteractiveMemoryMap() {
         showSecurePopup(savedLoc);
       }
     } catch (err: any) {
-      alert(err?.message || "Failed to save pin.");
+      alert(err.message || "Failed to save pin.");
     } finally {
       setIsSavingPin(false);
     }
   };
 
-  // Delete location pin (confirmation preserves memories)
   const handleDeleteLocation = async (id: string) => {
     const confirmDelete = window.confirm(
-      "Are you sure you want to remove this location pin? All attached memories will remain completely safe and preserved in your archive."
+      "Are you sure you want to remove this location pin? All attached memories will remain safely preserved in your archive."
     );
     if (!confirmDelete) return;
 
     try {
       const res = await fetch(`/api/locations/${id}`, { method: "DELETE" });
-      if (!res.ok) throw new Error("Failed to delete location");
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || "Failed to delete location.");
+      }
 
       setLocations((prev) => prev.filter((l) => l.id !== id));
-      if (selectedLocationId === id) {
-        setSelectedLocationId(null);
-      }
-      if (activeDrawerLocation?.id === id) {
-        setActiveDrawerLocation(null);
-      }
+      if (selectedLocationId === id) setSelectedLocationId(null);
+      if (activeDrawerLocation?.id === id) setActiveDrawerLocation(null);
       if (activePopupRef.current) {
         activePopupRef.current.remove();
         activePopupRef.current = null;
       }
     } catch (err: any) {
-      alert(err?.message || "Failed to delete location pin.");
+      alert(err.message || "Failed to delete location pin.");
     }
   };
 
@@ -686,6 +716,21 @@ export default function InteractiveMemoryMap() {
 
   return (
     <div className="space-y-6">
+      {errorMessage && (
+        <div className="p-3.5 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            <span>{errorMessage}</span>
+          </div>
+          <button
+            onClick={() => loadLocations()}
+            className="font-medium underline hover:text-rose-900 ml-2"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
       {/* Top Action Bar */}
       <div className="flex flex-wrap items-center justify-between gap-3 bg-white/70 backdrop-blur-md p-3.5 rounded-2xl border border-plum/10 shadow-paper">
         <div className="flex items-center gap-2 flex-1 min-w-[200px] max-w-md">
@@ -693,6 +738,7 @@ export default function InteractiveMemoryMap() {
             <Search className="w-4 h-4 text-plum/50 absolute left-3 top-1/2 -translate-y-1/2" />
             <input
               type="text"
+              aria-label="Filter memory footprints"
               placeholder="Filter memory footprints by name, city, or country..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
@@ -713,7 +759,6 @@ export default function InteractiveMemoryMap() {
             </button>
           )}
 
-          {/* Explicit demo toggle for previewing sample footprints */}
           {locations.length === 0 && (
             <button
               onClick={() => loadLocations(true)}
@@ -745,7 +790,7 @@ export default function InteractiveMemoryMap() {
         </div>
       </div>
 
-      {/* Pin Mode Creator Panel */}
+      {/* Pin Creator Panel */}
       {isAddingPin && (
         <div className="p-4 rounded-3xl bg-cream-100 border border-plum/20 shadow-float animate-fade-in space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-plum/10">
@@ -774,7 +819,15 @@ export default function InteractiveMemoryMap() {
             </button>
           </div>
 
-          {/* Place Search (OpenStreetMap Geocoding) */}
+          {/* Duplicate Warning */}
+          {duplicateWarning && (
+            <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-xs flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 shrink-0 text-amber-600" />
+              <span>{duplicateWarning}</span>
+            </div>
+          )}
+
+          {/* Place Search */}
           <div className="relative">
             <label className="block text-[11px] font-semibold text-plum/80 mb-1">
               Search Address, Landmark, or City (Automatic Placement)
@@ -793,7 +846,10 @@ export default function InteractiveMemoryMap() {
               )}
             </div>
 
-            {/* Geocode Results Dropdown */}
+            {geocodeError && (
+              <p className="text-[11px] text-plum/70 mt-1 italic">{geocodeError}</p>
+            )}
+
             {showGeocodeDropdown && geocodeResults.length > 0 && (
               <div className="absolute top-full left-0 right-0 mt-1.5 bg-white rounded-2xl border border-plum/15 shadow-float z-30 overflow-hidden divide-y divide-plum/5 max-h-48 overflow-y-auto">
                 {geocodeResults.map((result, idx) => (
@@ -867,7 +923,7 @@ export default function InteractiveMemoryMap() {
             />
           </div>
 
-          {/* Link Existing Memories */}
+          {/* Memories Selector */}
           {availableMemories.length > 0 && (
             <div>
               <label className="block text-[10px] font-semibold text-plum/70 mb-1.5">
@@ -906,7 +962,7 @@ export default function InteractiveMemoryMap() {
             </div>
           )}
 
-          {/* Save Button */}
+          {/* Actions */}
           <div className="flex items-center justify-end gap-2 pt-2">
             <button
               onClick={handleCancelPinMode}
@@ -935,14 +991,12 @@ export default function InteractiveMemoryMap() {
         </div>
       )}
 
-      {/* Main Map + Locations Grid */}
+      {/* Grid: Map + List */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Map Canvas / WebGL Fallback (2 Columns) */}
         <div className="lg:col-span-2 relative h-[540px] rounded-3xl overflow-hidden border border-plum/15 shadow-paper bg-cream-300/40 flex flex-col">
           {webGlAvailable ? (
             <>
               <div ref={mapContainer} className="w-full h-full" />
-              {/* Floating Overlay Badge */}
               <div className="absolute top-4 left-4 z-10 pointer-events-none">
                 <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/90 backdrop-blur-md border border-plum/10 shadow-sm text-plum text-[11px] font-medium">
                   <Navigation className="w-3 h-3 text-plum/70" />
@@ -951,7 +1005,6 @@ export default function InteractiveMemoryMap() {
               </div>
             </>
           ) : (
-            /* Graceful WebGL Unavailable Fallback */
             <div className="w-full h-full p-8 flex flex-col items-center justify-center text-center bg-cream-200/60">
               <div className="w-14 h-14 rounded-full bg-blush flex items-center justify-center text-plum mb-4 shadow-sm">
                 <Compass className="w-7 h-7" />
@@ -973,7 +1026,7 @@ export default function InteractiveMemoryMap() {
           )}
         </div>
 
-        {/* Places List Panel (1 Column) */}
+        {/* Places List Panel */}
         <div className="space-y-3 flex flex-col h-[540px]">
           <div className="flex items-center justify-between px-1">
             <h3 className="font-serif text-base font-bold text-plum">
@@ -990,7 +1043,6 @@ export default function InteractiveMemoryMap() {
                 <Loader2 className="w-6 h-6 text-plum/40 animate-spin" />
               </div>
             ) : filteredPlaces.length === 0 ? (
-              /* Polished Warm Empty State */
               <div className="h-full flex flex-col items-center justify-center p-6 text-center rounded-3xl bg-white/60 border border-dashed border-plum/20">
                 <div className="w-12 h-12 rounded-full bg-blush/80 flex items-center justify-center text-plum mb-3 shadow-sm">
                   <Compass className="w-6 h-6 text-plum/80" />
@@ -1081,10 +1133,10 @@ export default function InteractiveMemoryMap() {
         </div>
       </div>
 
-      {/* Linked Memories Drawer / Modal */}
+      {/* Drawer / Modal */}
       {activeDrawerLocation && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-plum/40 backdrop-blur-sm animate-fade-in">
-          <div className="bg-cream-100 rounded-3xl border border-plum/20 shadow-float max-w-xl w-full p-6 space-y-4 max-h-[85vh] flex flex-col">
+          <div className="bg-cream-100 rounded-3xl border border-plum/20 shadow-float max-w-xl w-full p-6 space-y-4 max-h-[90vh] flex flex-col">
             <div className="flex items-center justify-between pb-3 border-b border-plum/10">
               <div>
                 <span className="text-[10px] uppercase tracking-wider font-semibold text-plum/60">
@@ -1096,6 +1148,7 @@ export default function InteractiveMemoryMap() {
               </div>
               <button
                 onClick={() => setActiveDrawerLocation(null)}
+                aria-label="Close details"
                 className="w-8 h-8 rounded-full bg-white border border-plum/15 flex items-center justify-center text-plum hover:bg-cream-200 transition-colors"
               >
                 <X className="w-4 h-4" />
