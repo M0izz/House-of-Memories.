@@ -273,27 +273,68 @@ export type Database = {
       memory_locations: {
         Row: {
           id: string;
-          memory_id: string;
-          place_name: string;
+          space_id: string;
+          name: string;
+          address: string | null;
+          city: string | null;
+          region: string | null;
+          country: string | null;
           latitude: number;
           longitude: number;
-          date_visited: string | null;
+          description: string | null;
+          created_by: string | null;
+          created_at: string;
+          updated_at: string;
         };
         Insert: {
           id?: string;
-          memory_id: string;
-          place_name: string;
+          space_id: string;
+          name: string;
+          address?: string | null;
+          city?: string | null;
+          region?: string | null;
+          country?: string | null;
           latitude: number;
           longitude: number;
-          date_visited?: string | null;
+          description?: string | null;
+          created_by?: string | null;
+          created_at?: string;
+          updated_at?: string;
         };
         Update: {
           id?: string;
-          memory_id?: string;
-          place_name?: string;
+          space_id?: string;
+          name?: string;
+          address?: string | null;
+          city?: string | null;
+          region?: string | null;
+          country?: string | null;
           latitude?: number;
           longitude?: number;
-          date_visited?: string | null;
+          description?: string | null;
+          created_by?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+      };
+      memory_location_links: {
+        Row: {
+          id: string;
+          location_id: string;
+          memory_id: string;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          location_id: string;
+          memory_id: string;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          location_id?: string;
+          memory_id?: string;
+          created_at?: string;
         };
       };
       letters: {

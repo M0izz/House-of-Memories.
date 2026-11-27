@@ -4,8 +4,8 @@
 
 import fs from "fs";
 import path from "path";
-import { SAMPLE_MEMORIES } from "./sample-data";
-import type { Memory } from "./sample-data";
+import { SAMPLE_MEMORIES } from "./sample-data.ts";
+import type { Memory } from "./sample-data.ts";
 
 const DATA_DIR = path.join(process.cwd(), ".data");
 const DATA_FILE = path.join(DATA_DIR, "albums-store.json");

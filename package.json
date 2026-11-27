@@ -8,9 +8,10 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "test": "node --experimental-strip-types scripts/tests/unit-tests.mjs && node --experimental-strip-types scripts/tests/integration-tests.mjs",
+    "test": "node --experimental-strip-types scripts/tests/unit-tests.mjs && node --experimental-strip-types scripts/tests/integration-tests.mjs && node --experimental-strip-types scripts/tests/map-tests.mjs",
     "test:unit": "node --experimental-strip-types scripts/tests/unit-tests.mjs",
     "test:integration": "node --experimental-strip-types scripts/tests/integration-tests.mjs",
+    "test:map": "node --experimental-strip-types scripts/tests/map-tests.mjs",
     "test:real": "node --experimental-strip-types scripts/tests/real-provider-tests.mjs",
     "db:push": "npx supabase db push",
     "db:gen": "npx supabase gen types typescript --local > src/lib/supabase/types.ts"

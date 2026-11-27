@@ -14,12 +14,12 @@ import {
   createMemory as createLocalMemory,
   getTotalArchiveStats as getLocalArchiveStats,
   listAvailableMemoriesForSelection,
-  AlbumRecord,
-} from "@/lib/albums-store";
-import { Memory } from "@/lib/sample-data";
+  type AlbumRecord,
+} from "../albums-store.ts";
+import type { Memory } from "../sample-data.ts";
 
 async function getSupabaseServerClient(): Promise<any> {
-  const { createClient } = await import("@/lib/supabase/server");
+  const { createClient } = await import("../supabase/server.ts");
   return createClient();
 }
 
