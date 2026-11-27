@@ -2,8 +2,38 @@
 // House of Memories — Albums & Shared Collections Service
 // ============================================================================
 
+import fs from "fs";
+import path from "path";
 import { SAMPLE_MEMORIES } from "./sample-data";
 import type { Memory } from "./sample-data";
+
+const DATA_DIR = path.join(process.cwd(), ".data");
+const DATA_FILE = path.join(DATA_DIR, "albums-store.json");
+
+function loadStoreFromDisk(): AlbumsDataStore | null {
+  try {
+    if (typeof window === "undefined" && fs.existsSync(DATA_FILE)) {
+      const raw = fs.readFileSync(DATA_FILE, "utf-8");
+      return JSON.parse(raw);
+    }
+  } catch (err) {
+    console.error("Failed to load store from disk:", err);
+  }
+  return null;
+}
+
+function saveStoreToDisk(store: AlbumsDataStore) {
+  try {
+    if (typeof window === "undefined") {
+      if (!fs.existsSync(DATA_DIR)) {
+        fs.mkdirSync(DATA_DIR, { recursive: true });
+      }
+      fs.writeFileSync(DATA_FILE, JSON.stringify(store, null, 2), "utf-8");
+    }
+  } catch (err) {
+    console.error("Failed to save store to disk:", err);
+  }
+}
 
 export interface AlbumRecord {
   id: string;
@@ -44,6 +74,13 @@ declare global {
 function initializeStore(): AlbumsDataStore {
   if (global.__homAlbumsDataStore) {
     return global.__homAlbumsDataStore;
+  }
+
+  // Attempt to load durable state from disk first
+  const diskStore = loadStoreFromDisk();
+  if (diskStore && diskStore.albums && diskStore.memories) {
+    global.__homAlbumsDataStore = diskStore;
+    return diskStore;
   }
 
   const initialMemories: Memory[] = [...SAMPLE_MEMORIES];
@@ -109,6 +146,7 @@ function initializeStore(): AlbumsDataStore {
   };
 
   global.__homAlbumsDataStore = store;
+  saveStoreToDisk(store);
   return store;
 }
 
@@ -236,6 +274,7 @@ export function createAlbum(data: {
   };
 
   currentStore.albums.unshift(newAlbum);
+  saveStoreToDisk(currentStore);
   return newAlbum;
 }
 
@@ -266,6 +305,7 @@ export function updateAlbum(
   };
 
   currentStore.albums[idx] = updated;
+  saveStoreToDisk(currentStore);
   return updated;
 }
 
@@ -281,6 +321,7 @@ export function deleteAlbum(id: string, spaceId: string = "space-hom-main"): boo
   currentStore.albumMemories = currentStore.albumMemories.filter((am) => am.albumId !== id);
 
   // NOTE: Original memories in currentStore.memories are intentionally preserved untouched!
+  saveStoreToDisk(currentStore);
   return true;
 }
 
@@ -323,6 +364,7 @@ export function addMemoriesToAlbum(
   }
 
   album.updatedAt = now;
+  saveStoreToDisk(currentStore);
   return { addedCount, duplicateCount, album };
 }
 
@@ -344,6 +386,7 @@ export function removeMemoryFromAlbum(
   if (removed) {
     album.updatedAt = new Date().toISOString();
   }
+  saveStoreToDisk(currentStore);
   return removed;
 }
 
@@ -403,5 +446,6 @@ export function createMemory(data: Partial<Memory>): Memory {
   };
 
   currentStore.memories.unshift(newMemory);
+  saveStoreToDisk(currentStore);
   return newMemory;
 }

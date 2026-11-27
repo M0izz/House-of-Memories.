@@ -17,8 +17,9 @@ import {
   Compass,
   Bookmark,
 } from "lucide-react";
-import { format, differenceInDays } from "date-fns";
+import { format } from "date-fns";
 import { cn } from "@/lib/utils";
+import { calculateCountdown } from "@/lib/birthday";
 import {
   SAMPLE_MEMORIES,
   SAMPLE_MILESTONES,
@@ -35,11 +36,10 @@ export default function HomePage() {
   const today = new Date();
   const formattedToday = format(today, "EEEE, MMMM do, yyyy");
 
-  // Configured birthday date (e.g., April 15)
-  const birthdayDate = new Date(today.getFullYear(), 3, 15);
-  const daysUntilBirthday = differenceInDays(birthdayDate, today) > 0
-    ? differenceInDays(birthdayDate, today)
-    : 365 + differenceInDays(birthdayDate, today);
+  // Shared timezone-aware birthday countdown (Target: November 24)
+  const countdown = calculateCountdown(today);
+  const daysUntilBirthday = countdown.days;
+  const isCelebrationActive = countdown.isBirthday || isSimulatedBirthday;
 
   const handleNextFeatured = () => {
     setIsShuffling(true);
@@ -102,7 +102,7 @@ export default function HomePage() {
       </section>
 
       {/* 2. Dynamic Date-Aware Birthday Celebration or Countdown Banner */}
-      {isSimulatedBirthday ? (
+      {isCelebrationActive ? (
         <section className="relative overflow-hidden rounded-3xl bg-gradient-to-r from-butter via-blush to-butter p-6 sm:p-8 border border-plum/15 shadow-float text-plum animate-scale-up">
           <div className="washi-tape washi-tape-blush" />
           <div className="flex flex-col sm:flex-row items-center justify-between gap-6 relative z-10">
@@ -312,7 +312,7 @@ export default function HomePage() {
           </Link>
 
           {/* Birthday Anticipation (When not in birthday mode) */}
-          {!isSimulatedBirthday && (
+          {!isCelebrationActive && (
             <div className="bg-cream-100 rounded-3xl p-6 border border-plum/10 shadow-paper space-y-3">
               <div className="flex items-center justify-between text-xs text-plum/60 uppercase tracking-wider font-semibold">
                 <span>Special Occasion</span>

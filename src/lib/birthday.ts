@@ -35,11 +35,52 @@ export interface CountdownResult {
 }
 
 /**
+ * Extracts date components for a given Date object in a specific IANA timezone.
+ */
+export function getTimezoneDateParts(date: Date, timeZone: string) {
+  try {
+    const formatter = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      year: "numeric",
+      month: "numeric",
+      day: "numeric",
+      hour: "numeric",
+      minute: "numeric",
+      second: "numeric",
+      hour12: false,
+    });
+    const parts = formatter.formatToParts(date);
+    const getPart = (type: string) => {
+      const p = parts.find((pt) => pt.type === type);
+      return p ? parseInt(p.value, 10) : 0;
+    };
+    return {
+      year: getPart("year"),
+      month: getPart("month"),
+      day: getPart("day"),
+      hour: getPart("hour"),
+      minute: getPart("minute"),
+      second: getPart("second"),
+    };
+  } catch {
+    // Fallback if timezone string is invalid
+    return {
+      year: date.getFullYear(),
+      month: date.getMonth() + 1,
+      day: date.getDate(),
+      hour: date.getHours(),
+      minute: date.getMinutes(),
+      second: date.getSeconds(),
+    };
+  }
+}
+
+/**
  * Calculates the next occurrence of the birthday.
  * Supports:
  * - Recurring annually on month/day without hardcoding future years
  * - Initial target floor (e.g., Nov 24, 2027)
- * - Celebration state on the exact birthday date
+ * - Celebration state on the exact birthday date in the configured timezone
  * - Automatic rollover to the following year once the birthday has passed
  */
 export function getNextBirthday(
@@ -49,38 +90,34 @@ export function getNextBirthday(
   const birthMonth = config.birthMonth ?? DEFAULT_BIRTHDAY_CONFIG.birthMonth; // 11
   const birthDay = config.birthDay ?? DEFAULT_BIRTHDAY_CONFIG.birthDay; // 24
   const initialYear = config.initialYear ?? DEFAULT_BIRTHDAY_CONFIG.initialYear; // 2027
+  const timezone = config.timezone ?? DEFAULT_BIRTHDAY_CONFIG.timezone;
 
-  // Extract current date components in the configured timezone
-  const currentYear = now.getFullYear();
-  const currentMonth = now.getMonth() + 1; // 1-indexed
-  const currentDate = now.getDate();
+  // Extract current date components strictly in the configured timezone
+  const tzParts = getTimezoneDateParts(now, timezone);
+  const currentYear = tzParts.year;
+  const currentMonth = tzParts.month;
+  const currentDate = tzParts.day;
 
-  // Check if today is the birthday (matching month and day)
-  // If currentYear is already at or past the initialYear, or if celebration is active for the birthday day
+  // Check if today is the birthday in the configured timezone
   const isTodayBirthday = currentMonth === birthMonth && currentDate === birthDay && currentYear >= initialYear;
 
   let targetYear = currentYear;
 
   if (currentYear < initialYear) {
-    // Before the initial target year (e.g. in 2026 before 2027)
     targetYear = initialYear;
   } else {
-    // Current year is >= initialYear
-    const candidateThisYear = new Date(currentYear, birthMonth - 1, birthDay, 0, 0, 0, 0);
-
-    if (now.getTime() < candidateThisYear.getTime()) {
-      // Haven't reached this year's birthday yet
+    // Check if we are before, on, or past the birthday in this year
+    if (currentMonth < birthMonth || (currentMonth === birthMonth && currentDate < birthDay)) {
       targetYear = currentYear;
     } else if (isTodayBirthday) {
-      // It is currently the birthday!
       targetYear = currentYear;
     } else {
-      // Past this year's birthday, roll over to next year
       targetYear = currentYear + 1;
     }
   }
 
-  const nextDate = new Date(targetYear, birthMonth - 1, birthDay, 0, 0, 0, 0);
+  // Target birthday midnight in the target year
+  const nextDate = new Date(Date.UTC(targetYear, birthMonth - 1, birthDay, 0, 0, 0, 0));
 
   return {
     nextDate,
