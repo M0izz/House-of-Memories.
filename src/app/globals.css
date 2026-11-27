@@ -162,3 +162,36 @@ h1, h2, h3, .font-serif {
 ::-webkit-scrollbar-thumb:hover {
   background: rgba(73, 60, 70, 0.3);
 }
+
+/* MapLibre Custom Theme */
+.maplibregl-popup-content {
+  background: #FFF8F5 !important;
+  border: 1px solid rgba(73, 60, 70, 0.15) !important;
+  border-radius: 16px !important;
+  box-shadow: 0 10px 25px -5px rgba(73, 60, 70, 0.2) !important;
+  padding: 12px !important;
+}
+
+.maplibregl-popup-anchor-top .maplibregl-popup-tip {
+  border-bottom-color: #FFF8F5 !important;
+}
+.maplibregl-popup-anchor-bottom .maplibregl-popup-tip {
+  border-top-color: #FFF8F5 !important;
+}
+.maplibregl-popup-anchor-left .maplibregl-popup-tip {
+  border-right-color: #FFF8F5 !important;
+}
+.maplibregl-popup-anchor-right .maplibregl-popup-tip {
+  border-left-color: #FFF8F5 !important;
+}
+
+.maplibregl-popup-close-button {
+  font-size: 16px !important;
+  color: #493C46 !important;
+  padding: 4px 8px !important;
+  outline: none !important;
+}
+.maplibregl-popup-close-button:hover {
+  background: transparent !important;
+  color: #000 !important;
+}
